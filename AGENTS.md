@@ -1,1 +1,1 @@
-do not edit README.md. it's content is intentional.
+do not edit README.md. its content is intentional.
