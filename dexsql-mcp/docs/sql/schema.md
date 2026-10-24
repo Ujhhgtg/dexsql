@@ -113,6 +113,8 @@ One row per class definition. A type that is only referenced appears in `types`,
 | `access_flags` | `UInt32` | Class access flags. |
 | `superclass_descriptor` | `Utf8?` | Superclass descriptor; `NULL` when there is no superclass. |
 | `interface_count` | `UInt32` | Number of implemented interfaces (`0`, never `NULL`, for a class implementing none). |
+| `field_count` | `UInt32` | Number of declared fields (`0`, never `NULL`, for a class declaring none). |
+| `method_count` | `UInt32` | Number of declared methods (`0`, never `NULL`, for a class declaring none). |
 | `source_file` | `Utf8?` | Source file name; `NULL` when absent. |
 
 ## Reference and member views

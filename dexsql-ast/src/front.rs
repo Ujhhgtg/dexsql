@@ -458,14 +458,15 @@ fn classify_create(group: &[Token], sql: &str) -> Result<Statement, FrontError> 
     // the dialect; only IF NOT EXISTS is accepted.
     let mut replace = true;
     if let (Some(a), Some(b)) = (group.get(index), group.get(index + 1)) {
-        if a.keyword() == Some("IF") && b.keyword() == Some("NOT")
+        if a.keyword() == Some("IF")
+            && b.keyword() == Some("NOT")
             && group
                 .get(index + 2)
                 .is_some_and(|token| token.keyword() == Some("EXISTS"))
-            {
-                replace = false;
-                index += 3;
-            }
+        {
+            replace = false;
+            index += 3;
+        }
     }
 
     // Name: simple identifier, optionally qualified with `temp`.

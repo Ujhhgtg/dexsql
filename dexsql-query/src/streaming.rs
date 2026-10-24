@@ -823,6 +823,8 @@ impl<'a> Cells<'a> {
                     .map(|index| self.typ(index))
                     .unwrap_or_else(|| Scalar::text("")),
                 "interface_count" => Scalar::Int(class.interfaces.len() as i64),
+                "field_count" => Scalar::Int(class.fields.len() as i64),
+                "method_count" => Scalar::Int(class.methods.len() as i64),
                 "source_file" => class
                     .source_file_idx
                     .map(|index| self.string(index))

@@ -932,6 +932,11 @@ const TABLE_CLASSES: &[ColumnMeta] = &[
         nullable: false,
     },
     ColumnMeta {
+        name: "method_count",
+        sql_type: "UInt32",
+        nullable: false,
+    },
+    ColumnMeta {
         name: "source_file",
         sql_type: "Utf8",
         nullable: true,

@@ -322,8 +322,13 @@ fn flatten_and<'a>(expr: &'a Expr, out: &mut Vec<&'a Expr>) {
     }
 }
 
-const SCOPE_COLUMNS: &[&str] =
-    &["file_id", "method_idx", "class_idx", "field_idx", "string_pool_id"];
+const SCOPE_COLUMNS: &[&str] = &[
+    "file_id",
+    "method_idx",
+    "class_idx",
+    "field_idx",
+    "string_pool_id",
+];
 
 /// Collect the OR-grouped instr prefix predicates used by multi-package searchPackages.
 fn collect_or_instr_predicates(expr: &Expr, preds: &mut Vec<Pred>) -> Option<()> {
@@ -477,10 +482,7 @@ fn parse_predicates(select: &Select) -> Option<(Vec<Pred>, Vec<(String, String)>
                     return None;
                 };
                 if let Expr::BinaryOp {
-                    left,
-                    op,
-                    right,
-                    ..
+                    left, op, right, ..
                 } = inner.as_ref()
                 {
                     // Negated descriptor predicates (DexKit excludePackages):
@@ -566,9 +568,11 @@ fn distinct_pair(left: &Expr, right: &Expr) -> Option<(String, String)> {
     let ((left_alias_b, left_column_b), (right_alias_b, right_column_b)) = eq_aliases(right)?;
     let same_aliases = left_alias_a == left_alias_b && right_alias_a == right_alias_b;
     let file_columns = left_column_a == "file_id" && right_column_a == "file_id";
-    // Injective method units are distinct by method_idx; declared-field units by field_idx.
+    // Injective method units are distinct by method_idx, declared-field units by field_idx,
+    // and class-interface units by ordinal.
     let identity_columns = (left_column_b == "method_idx" && right_column_b == "method_idx")
-        || (left_column_b == "field_idx" && right_column_b == "field_idx");
+        || (left_column_b == "field_idx" && right_column_b == "field_idx")
+        || (left_column_b == "ordinal" && right_column_b == "ordinal");
     if !same_aliases || !file_columns || !identity_columns {
         return None;
     }
@@ -993,10 +997,7 @@ fn method_matches(file: &DexFile, method_idx: u32, filter: &MethodFilter) -> boo
         }
     }
     let param_count = proto.parameters.len() as i64;
-    if !filter.param_counts.is_empty()
-        && !filter
-            .param_counts.contains(&param_count)
-    {
+    if !filter.param_counts.is_empty() && !filter.param_counts.contains(&param_count) {
         return false;
     }
     if filter
@@ -1284,9 +1285,7 @@ fn add_predicate(filter: &mut MethodFilter, table: &str, pred: &Pred) -> Option<
                 | PredKind::ParamTypesMatch
                 | PredKind::ParamTypesMatchAny
                 | PredKind::Gte
-                | PredKind::Lte => {
-                    return None
-                }
+                | PredKind::Lte => return None,
             }
         }
         "method_using_numbers" => match pred.column.as_str() {
@@ -1308,20 +1307,16 @@ fn add_predicate(filter: &mut MethodFilter, table: &str, pred: &Pred) -> Option<
             }
             "class_descriptor" => match pred.kind {
                 PredKind::Eq => filter.classes.push(pred.text()?.to_owned()),
-                PredKind::NotPrefix => {
-                    filter.excluded_class_likes.push(StringNeed {
-                        mode: LikeMode::Prefix,
-                        value: pred.text()?.to_owned(),
-                        case_insensitive: false,
-                    })
-                }
-                PredKind::NotContains => {
-                    filter.excluded_class_likes.push(StringNeed {
-                        mode: LikeMode::Contains,
-                        value: pred.text()?.to_owned(),
-                        case_insensitive: false,
-                    })
-                }
+                PredKind::NotPrefix => filter.excluded_class_likes.push(StringNeed {
+                    mode: LikeMode::Prefix,
+                    value: pred.text()?.to_owned(),
+                    case_insensitive: false,
+                }),
+                PredKind::NotContains => filter.excluded_class_likes.push(StringNeed {
+                    mode: LikeMode::Contains,
+                    value: pred.text()?.to_owned(),
+                    case_insensitive: false,
+                }),
                 PredKind::Flags(_) => return None,
                 _ => filter.class_likes.push(class_descriptor_need(pred)?),
             },
@@ -1354,9 +1349,7 @@ fn add_predicate(filter: &mut MethodFilter, table: &str, pred: &Pred) -> Option<
                 | PredKind::ParamTypesMatch
                 | PredKind::ParamTypesMatchAny
                 | PredKind::Gte
-                | PredKind::Lte => {
-                    return None
-                }
+                | PredKind::Lte => return None,
             },
             "param_count" => match pred.kind {
                 PredKind::Eq => filter.param_counts.push(pred.int()?),
@@ -1486,7 +1479,10 @@ fn field_access_methods(file: &DexFile, filter: &RelationAccessFilter) -> HashSe
                     return false;
                 };
                 if !filter.field_names.is_empty()
-                    && !filter.field_names.iter().any(|value| value.as_str() == name)
+                    && !filter
+                        .field_names
+                        .iter()
+                        .any(|value| value.as_str() == name)
                 {
                     return false;
                 }
@@ -2064,6 +2060,7 @@ fn run_class_lookup(
     let mut unit_aliases = vec![base_alias.to_owned()];
     let mut superunit_aliases: Vec<String> = Vec::new();
     let mut class_aliases = Vec::new();
+    let mut interface_aliases: Vec<String> = Vec::new();
     for (index, columns) in joins.iter().enumerate() {
         let factor = &factors[index + 1];
         match factor.table.as_str() {
@@ -2086,6 +2083,17 @@ fn run_class_lookup(
                     return Err("unsupported fast class lookup join".into());
                 }
                 class_aliases.push(factor.alias.clone());
+            }
+            "class_interfaces" => {
+                if !is_class_interface_join(columns) {
+                    return Err("unsupported fast class lookup join".into());
+                }
+                let other = other_join_alias(columns, &factor.alias)
+                    .ok_or("unsupported fast class interface join")?;
+                if other != *base_alias && !unit_aliases.iter().any(|unit| unit == &other) {
+                    return Err("unsupported fast class interface anchor".into());
+                }
+                interface_aliases.push(factor.alias.clone());
             }
             _ => return Err("unsupported fast class lookup join".into()),
         }
@@ -2163,12 +2171,54 @@ fn run_class_lookup(
     let mut superclass: Vec<String> = Vec::new();
     let mut superclass_likes: Vec<StringNeed> = Vec::new();
     let mut class_flags: Vec<(i64, i64)> = Vec::new();
+    let mut field_count_min: Option<i64> = None;
+    let mut field_count_max: Option<i64> = None;
+    let mut method_count_min: Option<i64> = None;
+    let mut method_count_max: Option<i64> = None;
+    let mut interface_count_min: Option<i64> = None;
+    let mut interface_count_max: Option<i64> = None;
     for alias in &class_aliases {
         for pred in predicates {
             if pred.alias.as_deref() != Some(alias.as_str()) {
                 continue;
             }
             match pred.column.as_str() {
+                "field_count" => {
+                    let value = pred.int().ok_or("bad field_count predicate")?;
+                    match pred.kind {
+                        PredKind::Eq => {
+                            field_count_min = Some(value);
+                            field_count_max = Some(value);
+                        }
+                        PredKind::Gte => field_count_min = Some(value),
+                        PredKind::Lte => field_count_max = Some(value),
+                        _ => return Err("unsupported field_count predicate".into()),
+                    }
+                }
+                "method_count" => {
+                    let value = pred.int().ok_or("bad method_count predicate")?;
+                    match pred.kind {
+                        PredKind::Eq => {
+                            method_count_min = Some(value);
+                            method_count_max = Some(value);
+                        }
+                        PredKind::Gte => method_count_min = Some(value),
+                        PredKind::Lte => method_count_max = Some(value),
+                        _ => return Err("unsupported method_count predicate".into()),
+                    }
+                }
+                "interface_count" => {
+                    let value = pred.int().ok_or("bad interface_count predicate")?;
+                    match pred.kind {
+                        PredKind::Eq => {
+                            interface_count_min = Some(value);
+                            interface_count_max = Some(value);
+                        }
+                        PredKind::Gte => interface_count_min = Some(value),
+                        PredKind::Lte => interface_count_max = Some(value),
+                        _ => return Err("unsupported interface_count predicate".into()),
+                    }
+                }
                 "superclass_descriptor" => match pred.kind {
                     PredKind::Eq => superclass.push(
                         pred.text()
@@ -2193,10 +2243,53 @@ fn run_class_lookup(
             }
         }
     }
+    let mut interface_units: Vec<ClassInterfaceUnit> = Vec::new();
+    for alias in &interface_aliases {
+        let mut unit: Option<ClassInterfaceUnit> = None;
+        for pred in predicates {
+            if pred.alias.as_deref() != Some(alias.as_str()) {
+                continue;
+            }
+            match pred.column.as_str() {
+                "interface_descriptor" => {
+                    let need = match pred.kind {
+                        PredKind::Eq => StringNeed {
+                            mode: LikeMode::Equal,
+                            value: pred
+                                .text()
+                                .ok_or("bad class interface predicate")?
+                                .to_owned(),
+                            case_insensitive: false,
+                        },
+                        PredKind::Flags(_)
+                        | PredKind::ParamTypesMatch
+                        | PredKind::ParamTypesMatchAny
+                        | PredKind::Gte
+                        | PredKind::Lte => {
+                            return Err("unsupported class interface predicate".into())
+                        }
+                        _ => class_descriptor_need(pred)
+                            .ok_or("unsupported class interface predicate")?,
+                    };
+                    unit = Some(ClassInterfaceUnit(need));
+                }
+                "file_id" | "class_idx" if matches!(pred.kind, PredKind::Eq) => {}
+                _ => return Err("unsupported class interface predicate".into()),
+            }
+        }
+        interface_units.push(unit.ok_or("class interface join without predicate")?);
+    }
     if (!superclass.is_empty()
         || !superclass_likes.is_empty()
         || !class_flags.is_empty()
-        || !superunits.is_empty())
+        || !superunits.is_empty()
+        || !interface_units.is_empty()
+        || method_count_min.is_some()
+        || method_count_max.is_some()
+        || field_count_min.is_some()
+        || field_count_max.is_some()
+        || interface_count_min.is_some()
+        || interface_count_max.is_some())
         && ds
             .files
             .iter()
@@ -2213,6 +2306,14 @@ fn run_class_lookup(
         let right_unit = unit_aliases.iter().position(|alias| alias == right);
         match (left_unit, right_unit) {
             (Some(left_unit), Some(right_unit)) => injective_units.push((left_unit, right_unit)),
+            (None, None)
+                if interface_aliases.iter().any(|alias| alias == left)
+                    && interface_aliases.iter().any(|alias| alias == right) =>
+            {
+                // Interface units are matched injectively by
+                // class_interfaces_match, so the SQL distinctness pairs add
+                // no further constraint.
+            }
             _ => return Err("unsupported fast class distinctness".into()),
         }
     }
@@ -2367,7 +2468,17 @@ fn run_class_lookup(
             {
                 continue;
             }
-            if !superclass.is_empty() || !superclass_likes.is_empty() || !class_flags.is_empty() {
+            if !superclass.is_empty()
+                || !superclass_likes.is_empty()
+                || !class_flags.is_empty()
+                || !interface_units.is_empty()
+                || method_count_min.is_some()
+                || method_count_max.is_some()
+                || field_count_min.is_some()
+                || field_count_max.is_some()
+                || interface_count_min.is_some()
+                || interface_count_max.is_some()
+            {
                 let Some(defs) = file.classes_by_descriptor.get(&class_idx) else {
                     continue;
                 };
@@ -2375,6 +2486,27 @@ fn run_class_lookup(
                     let Some(class) = file.classes.get(*def_idx as usize) else {
                         return false;
                     };
+                    let method_count = class.methods.len() as i64;
+                    if method_count_min.is_some_and(|minimum| method_count < minimum)
+                        || method_count_max.is_some_and(|maximum| method_count > maximum)
+                    {
+                        return false;
+                    }
+                    let field_count = class.fields.len() as i64;
+                    if field_count_min.is_some_and(|minimum| field_count < minimum)
+                        || field_count_max.is_some_and(|maximum| field_count > maximum)
+                    {
+                        return false;
+                    }
+                    let interface_count = class.interfaces.len() as i64;
+                    if interface_count_min.is_some_and(|minimum| interface_count < minimum)
+                        || interface_count_max.is_some_and(|maximum| interface_count > maximum)
+                    {
+                        return false;
+                    }
+                    if !class_interfaces_match(file, class, &interface_units) {
+                        return false;
+                    }
                     if !superclass.is_empty() || !superclass_likes.is_empty() {
                         let Some(super_idx) = class.superclass_idx else {
                             return false;
@@ -2424,6 +2556,7 @@ fn run_bare_class_lookup(
     let mut superunit_aliases: Vec<String> = Vec::new();
     let mut literal_aliases: Vec<(String, String)> = Vec::new();
     let mut class_field_aliases: Vec<String> = Vec::new();
+    let mut interface_aliases: Vec<String> = Vec::new();
     for (index, columns) in joins.iter().enumerate() {
         let factor = &factors[index + 1];
         match factor.table.as_str() {
@@ -2457,6 +2590,17 @@ fn run_bare_class_lookup(
                 }
                 class_field_aliases.push(factor.alias.clone());
             }
+            "class_interfaces" => {
+                if !is_class_interface_join(columns) {
+                    return Err("unsupported bare class join".into());
+                }
+                let other = other_join_alias(columns, &factor.alias)
+                    .ok_or("unsupported bare class interface join")?;
+                if other != base_alias {
+                    return Err("unsupported bare class interface anchor".into());
+                }
+                interface_aliases.push(factor.alias.clone());
+            }
             _ => return Err("unsupported bare class join".into()),
         }
     }
@@ -2467,10 +2611,13 @@ fn run_bare_class_lookup(
     let mut class_flags: Vec<(i64, i64)> = Vec::new();
     let mut field_count_min: Option<i64> = None;
     let mut field_count_max: Option<i64> = None;
+    let mut method_count_min: Option<i64> = None;
+    let mut method_count_max: Option<i64> = None;
     let mut interface_count_min: Option<i64> = None;
     let mut interface_count_max: Option<i64> = None;
     let mut class_field_units: Vec<ClassFieldUnit> =
         vec![ClassFieldUnit::default(); class_field_aliases.len()];
+    let mut interface_units: Vec<Option<ClassInterfaceUnit>> = vec![None; interface_aliases.len()];
     for pred in predicates {
         let Some(alias) = pred.alias.as_deref() else {
             return Err("unsupported bare class predicate".into());
@@ -2516,6 +2663,18 @@ fn run_bare_class_lookup(
                         _ => return Err("unsupported field_count predicate".into()),
                     }
                 }
+                "method_count" => {
+                    let value = pred.int().ok_or("bad method_count predicate")?;
+                    match pred.kind {
+                        PredKind::Eq => {
+                            method_count_min = Some(value);
+                            method_count_max = Some(value);
+                        }
+                        PredKind::Gte => method_count_min = Some(value),
+                        PredKind::Lte => method_count_max = Some(value),
+                        _ => return Err("unsupported method_count predicate".into()),
+                    }
+                }
                 "interface_count" => {
                     let value = pred.int().ok_or("bad interface_count predicate")?;
                     match pred.kind {
@@ -2535,8 +2694,11 @@ fn run_bare_class_lookup(
         if let Some(index) = class_field_aliases.iter().position(|unit| unit == alias) {
             match pred.column.as_str() {
                 "field_name" if matches!(pred.kind, PredKind::Eq) => {
-                    class_field_units[index].name =
-                        Some(pred.text().ok_or("bad class field name predicate")?.to_owned());
+                    class_field_units[index].name = Some(
+                        pred.text()
+                            .ok_or("bad class field name predicate")?
+                            .to_owned(),
+                    );
                 }
                 "field_descriptor" if matches!(pred.kind, PredKind::Contains) => {
                     let literal = pred.text().ok_or("bad class field type predicate")?;
@@ -2546,15 +2708,42 @@ fn run_bare_class_lookup(
                     class_field_units[index].field_type = Some(field_type.to_owned());
                 }
                 "access_flags" => match pred.kind {
-                    PredKind::Flags(mask) => {
-                        class_field_units[index]
-                            .flags
-                            .push((mask, pred.int().ok_or("bad class field flag predicate")?))
-                    }
+                    PredKind::Flags(mask) => class_field_units[index]
+                        .flags
+                        .push((mask, pred.int().ok_or("bad class field flag predicate")?)),
                     _ => return Err("unsupported class field predicate".into()),
                 },
                 "file_id" | "field_idx" => {}
                 _ => return Err("unsupported class field predicate".into()),
+            }
+            continue;
+        }
+        if let Some(index) = interface_aliases.iter().position(|unit| unit == alias) {
+            match pred.column.as_str() {
+                "interface_descriptor" => {
+                    let need = match pred.kind {
+                        PredKind::Eq => StringNeed {
+                            mode: LikeMode::Equal,
+                            value: pred
+                                .text()
+                                .ok_or("bad class interface predicate")?
+                                .to_owned(),
+                            case_insensitive: false,
+                        },
+                        PredKind::Flags(_)
+                        | PredKind::ParamTypesMatch
+                        | PredKind::ParamTypesMatchAny
+                        | PredKind::Gte
+                        | PredKind::Lte => {
+                            return Err("unsupported class interface predicate".into())
+                        }
+                        _ => class_descriptor_need(pred)
+                            .ok_or("unsupported class interface predicate")?,
+                    };
+                    interface_units[index] = Some(ClassInterfaceUnit(need));
+                }
+                "file_id" | "class_idx" if matches!(pred.kind, PredKind::Eq) => {}
+                _ => return Err("unsupported class interface predicate".into()),
             }
             continue;
         }
@@ -2573,6 +2762,10 @@ fn run_bare_class_lookup(
     {
         return Err("class definitions are not retained by this dataset".into());
     }
+    let interface_units: Vec<ClassInterfaceUnit> = interface_units
+        .into_iter()
+        .map(|unit| unit.ok_or("class interface join without predicate"))
+        .collect::<Result<_, _>>()?;
     let mut superunits: Vec<MethodFilter> = superunit_aliases
         .iter()
         .map(|alias| {
@@ -2671,10 +2864,19 @@ fn run_bare_class_lookup(
                     {
                         return false;
                     }
+                    let method_count = class.methods.len() as i64;
+                    if method_count_min.is_some_and(|minimum| method_count < minimum)
+                        || method_count_max.is_some_and(|maximum| method_count > maximum)
+                    {
+                        return false;
+                    }
                     let interface_count = class.interfaces.len() as i64;
                     if interface_count_min.is_some_and(|minimum| interface_count < minimum)
                         || interface_count_max.is_some_and(|maximum| interface_count > maximum)
                     {
+                        return false;
+                    }
+                    if !class_interfaces_match(file, class, &interface_units) {
                         return false;
                     }
                     if !class_field_units.is_empty()
@@ -2744,6 +2946,51 @@ struct ClassFieldUnit {
 fn is_class_field_join(columns: &JoinColumns) -> bool {
     (columns.0 .1 == "class_descriptor" && columns.1 .1 == "descriptor")
         || (columns.0 .1 == "descriptor" && columns.1 .1 == "class_descriptor")
+}
+
+fn is_class_interface_join(columns: &JoinColumns) -> bool {
+    columns.0 .1 == "class_idx" && columns.1 .1 == "class_idx"
+}
+
+/// One directly-declared interface unit of a class lookup: the matched class must
+/// declare an interface whose descriptor matches the predicate; units are injective.
+#[derive(Debug, Clone)]
+struct ClassInterfaceUnit(StringNeed);
+
+/// Injective matching of declared-interface units against one class's interface list.
+fn class_interfaces_match(
+    file: &DexFile,
+    class: &dexsql_cache::ClassInfo,
+    units: &[ClassInterfaceUnit],
+) -> bool {
+    fn match_unit(
+        file: &DexFile,
+        class: &dexsql_cache::ClassInfo,
+        units: &[ClassInterfaceUnit],
+        index: usize,
+        used: &mut HashSet<usize>,
+    ) -> bool {
+        if index == units.len() {
+            return true;
+        }
+        let unit = &units[index];
+        for (position, interface) in class.interfaces.iter().enumerate() {
+            if used.contains(&position) {
+                continue;
+            }
+            if !plain_like_match(file.type_descriptor(*interface as u32), &unit.0) {
+                continue;
+            }
+            used.insert(position);
+            if match_unit(file, class, units, index + 1, used) {
+                return true;
+            }
+            used.remove(&position);
+        }
+        false
+    }
+    let mut used = HashSet::new();
+    match_unit(file, class, units, 0, &mut used)
 }
 
 /// Injective matching of declared-field units against one class's field list.
@@ -3244,7 +3491,10 @@ mod tests {
                  OR param_types_match(m.param_descriptors, 'Ljava/lang/String;,I,I,I,Ljava/lang/Object;,Ljava/lang/String;') = 1) \
              ORDER BY m.descriptor;";
         let fast = try_fast_descriptor_lookup(&parse(sql), &Dataset::default(), None);
-        assert!(fast.is_some(), "OR-grouped param_types_match must use the fast path");
+        assert!(
+            fast.is_some(),
+            "OR-grouped param_types_match must use the fast path"
+        );
     }
 
     #[test]
@@ -3259,7 +3509,10 @@ mod tests {
                AND ar0.visibility = 2 \
              ORDER BY m.descriptor;";
         let fast = try_fast_descriptor_lookup(&parse(sql), &Dataset::default(), None);
-        assert!(fast.is_some(), "OR-grouped searchPackages must use the fast path");
+        assert!(
+            fast.is_some(),
+            "OR-grouped searchPackages must use the fast path"
+        );
     }
 
     #[test]
@@ -3283,7 +3536,10 @@ mod tests {
                AND s0_0.value = 'Ljava/lang/Object;' \
              ORDER BY m.descriptor;";
         let fast = try_fast_descriptor_lookup(&parse(sql), &Dataset::default(), None);
-        assert!(fast.is_some(), "annotation + exclude packages must use the fast path");
+        assert!(
+            fast.is_some(),
+            "annotation + exclude packages must use the fast path"
+        );
     }
 
     #[test]
@@ -3813,6 +4069,77 @@ mod tests {
             "SELECT DISTINCT m.descriptor AS method FROM methods m              WHERE m.name > 3 ORDER BY m.descriptor;",
         );
         assert!(try_fast_descriptor_lookup(&text_bound, &dataset, None).is_none());
+    }
+
+    #[test]
+    fn accepts_class_interface_units() {
+        // Shape emitted by WeKit's class-level interfaceSpec { } matcher on the
+        // methods-anchored class path: injective class_interfaces joins distinct by ordinal.
+        let sql = "SELECT DISTINCT cm.class_descriptor AS descriptor FROM methods cm \
+             JOIN method_strings ms0 ON ms0.method = cm.descriptor \
+             JOIN class_interfaces ci0 ON ci0.class_idx = cm.class_idx \
+             JOIN class_interfaces ci1 ON ci1.class_idx = cm.class_idx \
+             WHERE ms0.file_id = cm.file_id AND ms0.method_idx = cm.method_idx \
+               AND instr(ms0.value, 'activity') > 0 \
+               AND ci0.file_id = cm.file_id \
+               AND ci0.interface_descriptor = 'Landroid/app/Activity;' \
+               AND ci1.file_id = cm.file_id \
+               AND instr(ci1.interface_descriptor, 'Landroid/view') = 1 \
+               AND NOT (ci0.file_id = ci1.file_id AND ci0.ordinal = ci1.ordinal) \
+             ORDER BY cm.class_descriptor;";
+        let fast = try_fast_descriptor_lookup(&parse(sql), &Dataset::default(), None);
+        assert!(
+            fast.is_some(),
+            "class interface units must use the fast path"
+        );
+    }
+
+    #[test]
+    fn accepts_bare_class_interface_units() {
+        let sql = "SELECT DISTINCT c.descriptor AS descriptor FROM classes c \
+             JOIN class_interfaces ci0 ON ci0.class_idx = c.class_idx \
+             JOIN class_interfaces ci1 ON ci1.class_idx = c.class_idx \
+             WHERE ci0.file_id = c.file_id \
+               AND ci0.interface_descriptor = 'Landroid/app/Activity;' \
+               AND ci1.file_id = c.file_id \
+               AND instr(ci1.interface_descriptor, 'Landroid/view') = 1 \
+               AND NOT (ci0.file_id = ci1.file_id AND ci0.ordinal = ci1.ordinal) \
+             ORDER BY c.descriptor;";
+        let fast = try_fast_descriptor_lookup(&parse(sql), &Dataset::default(), None);
+        assert!(
+            fast.is_some(),
+            "bare class interface units must use the fast path"
+        );
+    }
+
+    #[test]
+    fn accepts_class_method_count_with_interface_count() {
+        // Shape emitted by WeKit's class methodCount matcher on the methods-anchored class path;
+        // interfaceCount joins the same classes alias.
+        let sql = "SELECT DISTINCT cm.class_descriptor AS descriptor FROM methods cm \
+             JOIN classes c ON c.descriptor = cm.class_descriptor \
+             WHERE cm.name = 'onSceneEnd' AND cm.param_count = 4 \
+               AND ((c.access_flags & 1536) = 1536) \
+               AND c.file_id = cm.file_id AND c.class_idx = cm.class_idx \
+               AND c.interface_count = 0 AND c.method_count = 1 \
+             ORDER BY cm.class_descriptor;";
+        let fast = try_fast_descriptor_lookup(&parse(sql), &Dataset::default(), None);
+        assert!(
+            fast.is_some(),
+            "class method_count/interface_count predicates must use the fast path"
+        );
+    }
+
+    #[test]
+    fn accepts_bare_class_method_count() {
+        let sql = "SELECT DISTINCT c.descriptor AS descriptor FROM classes c \
+             WHERE c.descriptor = 'Lcom/tencent/mm/ui/LauncherUI;' \
+               AND c.method_count = 1 ORDER BY c.descriptor;";
+        let fast = try_fast_descriptor_lookup(&parse(sql), &Dataset::default(), None);
+        assert!(
+            fast.is_some(),
+            "bare class method_count lookup must use the fast path"
+        );
     }
 
     #[test]

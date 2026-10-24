@@ -4757,6 +4757,7 @@ fn scan_predicate_column(table: &str, column: &str) -> bool {
                 | "superclass_descriptor"
                 | "interface_count"
                 | "field_count"
+                | "method_count"
                 | "source_file"
         ),
         "fields" => matches!(
@@ -7626,6 +7627,7 @@ fn scan_classes(
                     "superclass_descriptor" => Scalar::text(superclass.clone()),
                     "interface_count" => Scalar::Int(class.interfaces.len() as i64),
                     "field_count" => Scalar::Int(class.fields.len() as i64),
+                    "method_count" => Scalar::Int(class.methods.len() as i64),
                     "source_file" => Scalar::text(source.clone()),
                     _ => Scalar::Null,
                 }) {
@@ -7668,6 +7670,13 @@ fn scan_classes(
             }
             if needs("field_count") {
                 row.put(alias, "field_count", Scalar::Int(class.fields.len() as i64));
+            }
+            if needs("method_count") {
+                row.put(
+                    alias,
+                    "method_count",
+                    Scalar::Int(class.methods.len() as i64),
+                );
             }
             if needs("source_file") {
                 row.put(alias, "source_file", Scalar::text(source));
