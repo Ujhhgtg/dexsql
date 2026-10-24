@@ -54,6 +54,8 @@ struct MethodFilter {
     param_descriptors: Vec<String>,
     /// positional parameter patterns, all of which must match.
     param_patterns: Vec<ParamPattern>,
+    /// ANY-of parameter patterns (DexKit anyOf alternatives).
+    param_pattern_any: Vec<ParamPattern>,
     /// Inclusive lower/upper bounds for param_count ranges (all must hold).
     param_count_min: Vec<i64>,
     param_count_max: Vec<i64>,
@@ -77,6 +79,7 @@ impl MethodFilter {
             && self.param_counts.is_empty()
             && self.param_descriptors.is_empty()
             && self.param_patterns.is_empty()
+            && self.param_pattern_any.is_empty()
             && self.param_count_min.is_empty()
             && self.param_count_max.is_empty()
             && self.flags.is_empty()
@@ -96,6 +99,7 @@ impl MethodFilter {
         self.param_counts.extend(other.param_counts);
         self.param_descriptors.extend(other.param_descriptors);
         self.param_patterns.extend(other.param_patterns);
+        self.param_pattern_any.extend(other.param_pattern_any);
         self.param_count_min.extend(other.param_count_min);
         self.param_count_max.extend(other.param_count_max);
         self.flags.extend(other.flags);
@@ -131,6 +135,8 @@ enum PredKind {
     Flags(i64),
     /// param_types_match(column, pattern): positional parameter pattern.
     ParamTypesMatch,
+    /// param_types_match alternative inside an OR group (DexKit anyOf).
+    ParamTypesMatchAny,
     /// Inclusive lower/upper bound on an integer column (param_count ranges).
     Gte,
     Lte,
@@ -340,6 +346,20 @@ fn collect_or_instr_predicates(expr: &Expr, preds: &mut Vec<Pred>) -> Option<()>
         left, op, right, ..
     } = expr
     {
+        if matches!(op, BinaryOperator::Eq) {
+            if let Some(pred) = param_types_match_predicate(left) {
+                if function_literal_int(right) == Some(1) {
+                    preds.push(Pred {
+                        alias: pred.alias,
+                        column: pred.column,
+                        kind: PredKind::ParamTypesMatchAny,
+                        value: pred.value,
+                        escape: None,
+                    });
+                    return Some(());
+                }
+            }
+        }
         let pred = string_function_predicate(left, right, op)?;
         if !matches!(pred.kind, PredKind::Prefix) {
             return None;
@@ -880,6 +900,7 @@ fn class_descriptor_need(pred: &Pred) -> Option<StringNeed> {
         PredKind::Eq
         | PredKind::Flags(_)
         | PredKind::ParamTypesMatch
+        | PredKind::ParamTypesMatchAny
         | PredKind::Gte
         | PredKind::Lte => None,
     }
@@ -994,6 +1015,15 @@ fn method_matches(file: &DexFile, method_idx: u32, filter: &MethodFilter) -> boo
     }
     if !filter.param_patterns.is_empty()
         && !filter.param_patterns.iter().all(|pattern| {
+            pattern.matches_params(proto.parameters.len(), |index| {
+                file.type_descriptor(proto.parameters[index] as u32)
+            })
+        })
+    {
+        return false;
+    }
+    if !filter.param_pattern_any.is_empty()
+        && !filter.param_pattern_any.iter().any(|pattern| {
             pattern.matches_params(proto.parameters.len(), |index| {
                 file.type_descriptor(proto.parameters[index] as u32)
             })
@@ -1250,7 +1280,11 @@ fn add_predicate(filter: &mut MethodFilter, table: &str, pred: &Pred) -> Option<
                     value: pred.text()?.to_owned(),
                     case_insensitive: false,
                 }),
-                PredKind::Flags(_) | PredKind::ParamTypesMatch | PredKind::Gte | PredKind::Lte => {
+                PredKind::Flags(_)
+                | PredKind::ParamTypesMatch
+                | PredKind::ParamTypesMatchAny
+                | PredKind::Gte
+                | PredKind::Lte => {
                     return None
                 }
             }
@@ -1316,7 +1350,11 @@ fn add_predicate(filter: &mut MethodFilter, table: &str, pred: &Pred) -> Option<
                     value: pred.text()?.to_owned(),
                     case_insensitive: false,
                 }),
-                PredKind::Flags(_) | PredKind::ParamTypesMatch | PredKind::Gte | PredKind::Lte => {
+                PredKind::Flags(_)
+                | PredKind::ParamTypesMatch
+                | PredKind::ParamTypesMatchAny
+                | PredKind::Gte
+                | PredKind::Lte => {
                     return None
                 }
             },
@@ -1330,6 +1368,9 @@ fn add_predicate(filter: &mut MethodFilter, table: &str, pred: &Pred) -> Option<
                 PredKind::Eq => filter.param_descriptors.push(pred.text()?.to_owned()),
                 PredKind::ParamTypesMatch => filter
                     .param_patterns
+                    .push(ParamPattern::parse(pred.text()?)),
+                PredKind::ParamTypesMatchAny => filter
+                    .param_pattern_any
                     .push(ParamPattern::parse(pred.text()?)),
                 _ => return None,
             },
@@ -3193,6 +3234,17 @@ mod tests {
             fast.is_some(),
             "declared-class annotation unit must use the fast path"
         );
+    }
+
+    #[test]
+    fn accepts_or_grouped_param_types_patterns() {
+        let sql = "SELECT DISTINCT m.descriptor AS method FROM methods m \
+             WHERE m.name = 'run' \
+               AND (param_types_match(m.param_descriptors, 'Ljava/lang/String;,I,I,I,Ljava/lang/Object;') = 1 \
+                 OR param_types_match(m.param_descriptors, 'Ljava/lang/String;,I,I,I,Ljava/lang/Object;,Ljava/lang/String;') = 1) \
+             ORDER BY m.descriptor;";
+        let fast = try_fast_descriptor_lookup(&parse(sql), &Dataset::default(), None);
+        assert!(fast.is_some(), "OR-grouped param_types_match must use the fast path");
     }
 
     #[test]
