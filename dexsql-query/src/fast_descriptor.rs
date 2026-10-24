@@ -319,6 +319,37 @@ fn flatten_and<'a>(expr: &'a Expr, out: &mut Vec<&'a Expr>) {
 const SCOPE_COLUMNS: &[&str] =
     &["file_id", "method_idx", "class_idx", "field_idx", "string_pool_id"];
 
+/// Collect the OR-grouped instr prefix predicates used by multi-package searchPackages.
+fn collect_or_instr_predicates(expr: &Expr, preds: &mut Vec<Pred>) -> Option<()> {
+    let mut expr = expr;
+    while let Expr::Nested(inner) = expr {
+        expr = inner.as_ref();
+    }
+    if let Expr::BinaryOp {
+        left,
+        op: BinaryOperator::Or,
+        right,
+        ..
+    } = expr
+    {
+        collect_or_instr_predicates(left, preds)?;
+        collect_or_instr_predicates(right, preds)?;
+        return Some(());
+    }
+    if let Expr::BinaryOp {
+        left, op, right, ..
+    } = expr
+    {
+        let pred = string_function_predicate(left, right, op)?;
+        if !matches!(pred.kind, PredKind::Prefix) {
+            return None;
+        }
+        preds.push(pred);
+        return Some(());
+    }
+    None
+}
+
 fn parse_predicates(select: &Select) -> Option<(Vec<Pred>, Vec<(String, String)>)> {
     let mut conjuncts = Vec::new();
     if let Some(selection) = &select.selection {
@@ -470,6 +501,22 @@ fn parse_predicates(select: &Select) -> Option<(Vec<Pred>, Vec<(String, String)>
                     continue;
                 }
                 return None;
+            }
+            Expr::Nested(inner) => {
+                // Canonical searchPackages group:
+                //   (instr(col, 'Lpkg1/') = 1 OR instr(col, 'Lpkg2/') = 1)
+                // or a single parenthesized instr predicate.
+                collect_or_instr_predicates(inner, &mut preds)?;
+            }
+            Expr::BinaryOp {
+                left,
+                op: BinaryOperator::Or,
+                right,
+                ..
+            } => {
+                // sqlparser may strip the parentheses around an OR group inside an AND chain.
+                collect_or_instr_predicates(left, &mut preds)?;
+                collect_or_instr_predicates(right, &mut preds)?;
             }
             Expr::Function(function) => {
                 preds.push(param_types_match_function_predicate(function)?);
@@ -3146,6 +3193,21 @@ mod tests {
             fast.is_some(),
             "declared-class annotation unit must use the fast path"
         );
+    }
+
+    #[test]
+    fn accepts_or_grouped_search_packages() {
+        let sql = "SELECT DISTINCT m.descriptor AS method FROM methods m \
+             JOIN annotation_elements_resolved ar0 ON ar0.owner = m.class_descriptor \
+             WHERE m.name = 'callback' \
+               AND (instr(m.class_descriptor, 'Lcom/tencent/mm/voipmp/helper/') = 1 \
+                 OR instr(m.class_descriptor, 'Lcom/tencent/plugin_flutter_ilinkvoip/helper/') = 1) \
+               AND ar0.owner_kind = 'class' \
+               AND ar0.annotation = 'Ldalvik/annotation/Signature;' \
+               AND ar0.visibility = 2 \
+             ORDER BY m.descriptor;";
+        let fast = try_fast_descriptor_lookup(&parse(sql), &Dataset::default(), None);
+        assert!(fast.is_some(), "OR-grouped searchPackages must use the fast path");
     }
 
     #[test]
