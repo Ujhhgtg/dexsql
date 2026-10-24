@@ -144,7 +144,7 @@ pub fn render_method_with_flags(
         let op = (code.insns[pc] & 0xff) as u8;
         // Payloads are rendered in a separate block at the end, matching the
         // original renderer's layout.
-        if op == 0 && matches!(code.insns[pc] >> 8, 1 | 2 | 3) {
+        if op == 0 && matches!(code.insns[pc] >> 8, 1..=3) {
             pc += payload_width(code, pc);
             continue;
         }
@@ -283,7 +283,7 @@ fn collect_labels(code: &CodeItem, labels: &mut BTreeSet<u32>, payloads: &mut Ve
                 let off = read_i32(code, pc + 1);
                 labels.insert(branch_target(code, pc, off) as u32);
             }
-            0x32..=0x37 | 0x38..=0x3d => {
+            0x32..=0x3d => {
                 let off = code.insns.get(pc + 1).copied().unwrap_or(0) as i16 as i32;
                 labels.insert(branch_target(code, pc, off) as u32);
             }
@@ -752,7 +752,7 @@ fn format_instruction(dex: &DexFile, code: &CodeItem, pc: usize) -> String {
                         (x >> 4) & 0xf,
                         (x >> 8) & 0xf,
                         (x >> 12) & 0xf,
-                        ((u >> 8) & 0xf) as u16,
+                        ((u >> 8) & 0xf),
                     ],
                     count,
                 )
@@ -950,7 +950,7 @@ fn format_invoke(dex: &DexFile, code: &CodeItem, pc: usize, op: u8) -> String {
                 (x >> 4) & 0xf,
                 (x >> 8) & 0xf,
                 (x >> 12) & 0xf,
-                ((u >> 8) & 0xf) as u16,
+                ((u >> 8) & 0xf),
             ],
             count,
         )

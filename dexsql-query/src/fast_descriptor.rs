@@ -875,9 +875,7 @@ fn method_matches(file: &DexFile, method_idx: u32, filter: &MethodFilter) -> boo
     let param_count = proto.parameters.len() as i64;
     if !filter.param_counts.is_empty()
         && !filter
-            .param_counts
-            .iter()
-            .any(|value| *value == param_count)
+            .param_counts.contains(&param_count)
     {
         return false;
     }
@@ -1034,8 +1032,8 @@ fn filtered_methods(file: &DexFile, filter: &MethodFilter) -> Vec<u32> {
     }
 }
 
-fn projected_column<'a>(
-    select: &'a Select,
+fn projected_column(
+    select: &Select,
     base_alias: &str,
 ) -> Option<((Option<String>, String), String)> {
     let SelectItem::ExprWithAlias { expr, alias } = &select.projection[0] else {
@@ -1855,7 +1853,7 @@ fn run_class_lookup(
         })
         .collect();
     let mut rows = Vec::new();
-    for (file, classes) in ds.files.iter().zip(per_file.into_iter()) {
+    for (file, classes) in ds.files.iter().zip(per_file) {
         for class_idx in classes {
             let descriptor = file.type_descriptor(class_idx);
             if !superunit_allowed.is_empty() {

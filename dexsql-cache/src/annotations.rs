@@ -154,7 +154,7 @@ fn encoded_annotation_json(
 #[cfg(test)]
 mod tests {
     use super::{annotation_set_json, encoded_annotation_json, encoded_value_json, Cursor};
-    use dexsql_cache::{Dataset, DexFile};
+    use crate::{Dataset, DexFile};
     use serde_json::json;
     use std::path::PathBuf;
     use std::sync::Arc;

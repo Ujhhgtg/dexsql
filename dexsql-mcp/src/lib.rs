@@ -962,9 +962,7 @@ fn initialize(params: &Value) -> Result<Value, (i32, String)> {
 }
 
 fn dispatch(req: Request, state: &Arc<Mutex<State>>, cfg: &Config) -> Option<Response> {
-    if req.id.is_none() {
-        return None;
-    }
+    req.id.as_ref()?;
     let id = req.id.unwrap_or(Value::Null);
     let result: Result<Value, (i32, String)> = match req.method.as_str() {
         "initialize" => initialize(&req.params),
@@ -988,6 +986,7 @@ fn dispatch(req: Request, state: &Arc<Mutex<State>>, cfg: &Config) -> Option<Res
         Err((c, m)) => error_response(id, c, m),
     })
 }
+
 fn validate_request_meta(params: &Value) -> Result<(), (i32, String)> {
     let meta = params
         .get("_meta")
@@ -2425,7 +2424,7 @@ fn simple_select(
                             }
                             "param_descriptors" => proto.map_or(Value::Null, |p| {
                                 typed_utf8(
-                                    &p.parameters
+                                    p.parameters
                                         .iter()
                                         .map(|t| file.type_descriptor(*t as u32))
                                         .collect::<Vec<_>>()
@@ -2716,10 +2715,10 @@ fn decode_tool(a: &Value, state: &Arc<Mutex<State>>) -> Result<Value, (i32, Stri
         return Err((-32004, "class is not defined in the selected DEX".into()));
     }
     let target = method_idx.map(|value| value as u32);
-    for f in dataset
+    if let Some(f) = dataset
         .files
         .iter()
-        .filter(|f| fid.is_none_or(|x| x == f.file_id))
+        .find(|f| fid.is_none_or(|x| x == f.file_id))
     {
         let idx = if let Some(idx) = target {
             idx
@@ -2974,7 +2973,9 @@ fn parse_resources_arsc(bytes: &[u8]) -> Result<Vec<Value>, String> {
 
     fn package_name(name: &[u8; 256]) -> String {
         let units = name
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|part| u16::from_le_bytes([part[0], part[1]]))
             .take_while(|unit| *unit != 0)
             .collect::<Vec<_>>();
@@ -3022,7 +3023,7 @@ fn parse_resources_arsc(bytes: &[u8]) -> Result<Vec<Value>, String> {
     };
     let mut rows = Vec::new();
     for package in packages {
-        let package_id = (package.header.id & 0xff) as u32;
+        let package_id = package.header.id & 0xff;
         let package_text = package_name(&package.header.name);
         for (config, type_map) in &package.resources {
             let configuration = config.as_string();
@@ -3705,7 +3706,8 @@ fn decode_binary_xml_legacy(bytes: &[u8]) -> Result<String, String> {
         for chunk in bytes
             .get(pos..end)
             .ok_or_else(|| "binary XML string is truncated".to_owned())?
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
         {
             units.push(u16::from_le_bytes([chunk[0], chunk[1]]));
         }

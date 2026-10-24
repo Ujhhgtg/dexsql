@@ -1117,6 +1117,7 @@ pub fn field_access_is_read(opcode: u8) -> bool {
 /// The index is built per (file, class) on first use; each entry only stores the
 /// matching local -> defining member ids.
 #[derive(Debug)]
+#[derive(Default)]
 pub struct CrossRefCache {
     files: Vec<std::sync::Mutex<CrossFileCache>>,
 }
@@ -1161,11 +1162,6 @@ impl FieldBinding {
     }
 }
 
-impl Default for CrossRefCache {
-    fn default() -> Self {
-        Self { files: Vec::new() }
-    }
-}
 
 impl CrossRefCache {
     pub fn new(file_count: usize) -> Self {

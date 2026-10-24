@@ -1060,7 +1060,7 @@ impl DexFile {
         }
         let n = read_u32(bytes, set_off).unwrap_or(0) as usize;
         for i in 0..n {
-            if let Some(off) = read_u32(bytes, set_off + 4 + i * 4).ok() {
+            if let Ok(off) = read_u32(bytes, set_off + 4 + i * 4) {
                 out.push(off as usize);
             }
         }
@@ -2158,7 +2158,7 @@ impl Dataset {
             for (row_idx, row) in part.method_numbers.iter().enumerate() {
                 part.method_numbers_by_value
                     .entry(row.long_value)
-                    .or_insert_with(Vec::new)
+                    .or_default()
                     .push(row.method_idx);
                 part.method_number_rows_by_value
                     .entry(row.long_value)
@@ -2673,7 +2673,7 @@ fn native_base_counts_section(dataset: &Dataset) -> Vec<u8> {
             "debug_positions" => debug_count(2),
             "debug_opcodes" => debug_count(3),
             "debug_locals" => debug_count(4),
-            _ => dataset.count(table).unwrap_or(0) as u64,
+            _ => dataset.count(table).unwrap_or(0),
         };
         let _ = write_string(&mut out, table);
         let _ = write_u64(&mut out, count);
@@ -3541,7 +3541,7 @@ impl NativeMethodRefs {
                         let width = if count == 0 { 0 } else { count as usize + 1 };
                         (offset as usize)
                             .checked_add(width)
-                            .map_or(true, |end| end > storage_keys.len())
+                            .is_none_or(|end| end > storage_keys.len())
                     })
                 || !is_permutation(&reverse_perm, packed_index.len())
             {
@@ -3760,7 +3760,7 @@ impl NativeMethodIdentities {
         }
         let mut cursor = NativeCsrCursor::parse(bytes)?;
         let directory_len = cursor.read_u32()? as usize;
-        if directory_len < 2 || directory_len > 4096 {
+        if !(2..=4096).contains(&directory_len) {
             return Err(LoadError(
                 "native method-identities file directory is invalid".into(),
             ));
@@ -3905,7 +3905,7 @@ fn hex_digit(byte: u8) -> Option<u8> {
     }
 }
 
-fn native_manifest_bytes<'a>(bytes: &'a [u8]) -> Result<&'a [u8], LoadError> {
+fn native_manifest_bytes(bytes: &[u8]) -> Result<&[u8], LoadError> {
     if bytes.get(..4) == Some(b"DXC2") {
         let sections = parse_native_container(bytes)?;
         let section = sections
@@ -4393,7 +4393,7 @@ fn parse_dex(
                     .or_insert_with(Vec::new)
                     .push(i);
                 methods_by_return
-                    .entry(proto.return_type_idx as u32)
+                    .entry(proto.return_type_idx)
                     .or_insert_with(Vec::new)
                     .push(i);
             }
@@ -4617,7 +4617,7 @@ fn rebuild_method_lookup_indexes(dex: &mut DexFile) {
                 .or_default()
                 .push(method_idx as u32);
             dex.methods_by_return
-                .entry(proto.return_type_idx as u32)
+                .entry(proto.return_type_idx)
                 .or_default()
                 .push(method_idx as u32);
         }

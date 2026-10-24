@@ -1992,20 +1992,16 @@ fn find_trim_syntax_rejection(
 ) -> Option<Option<(usize, usize)>> {
     use sqlparser::ast::Expr;
     let mut rejected: Option<Option<(usize, usize)>> = None;
-    let mut visit = |expr: &Expr, visit: &mut dyn FnMut(&Expr)| match expr {
-        Expr::Trim {
+    let mut visit = |expr: &Expr, _visit: &mut dyn FnMut(&Expr)| if let Expr::Trim {
             trim_where,
             trim_what,
             ..
-        } => {
-            if trim_where.is_some() || trim_what.is_some() {
-                if rejected.is_none() {
-                    let span = trim_what.as_ref().and_then(|what| expr_span(what, sql));
-                    rejected = Some(span);
-                }
+        } = expr {
+        if (trim_where.is_some() || trim_what.is_some())
+            && rejected.is_none() {
+                let span = trim_what.as_ref().and_then(|what| expr_span(what, sql));
+                rejected = Some(span);
             }
-        }
-        _ => {}
     };
     let _ = &mut visit;
     for statement in statements {
@@ -2062,7 +2058,7 @@ fn line_column_to_offset(sql: &str, line: usize, column: usize) -> usize {
 
 /// Walk the expressions of a query's SELECT bodies and set operations.
 fn walk_query_exprs(query: &sqlparser::ast::Query, visit: &mut dyn FnMut(&sqlparser::ast::Expr)) {
-    use sqlparser::ast::SetExpr;
+    
     walk_set_expr_exprs(query.body.as_ref(), visit);
 }
 
@@ -2305,11 +2301,10 @@ fn scalar_from_rendered(value: &str) -> Scalar {
     if let Ok(number) = value.parse::<i64>() {
         return Scalar::Int(number);
     }
-    if value.contains('.') || value.contains('e') || value.contains('E') {
-        if value.parse::<f64>().is_ok() {
+    if (value.contains('.') || value.contains('e') || value.contains('E'))
+        && value.parse::<f64>().is_ok() {
             return Scalar::Real(value.to_owned());
         }
-    }
     Scalar::text(value.to_owned())
 }
 
@@ -3760,7 +3755,7 @@ fn try_fast_count_scan(
     cli_limit: Option<u64>,
 ) -> Option<Result<QueryResult, String>> {
     use sqlparser::ast::{
-        Expr, Function, FunctionArg, FunctionArgExpr, FunctionArguments, SelectItem, SetExpr,
+        Expr, FunctionArg, FunctionArgExpr, FunctionArguments, SelectItem, SetExpr,
     };
     let select = match query.body.as_ref() {
         SetExpr::Select(select) => select.as_ref(),
@@ -4621,7 +4616,7 @@ fn desugar_expr(
             right: Box::new(desugar_expr(right, ds, source_dataset, named_caches)?),
         }),
         Expr::UnaryOp { op, expr } => Ok(Expr::UnaryOp {
-            op: op.clone(),
+            op: *op,
             expr: Box::new(desugar_expr(expr, ds, source_dataset, named_caches)?),
         }),
         Expr::Nested(expr) => Ok(Expr::Nested(Box::new(desugar_expr(
@@ -4936,7 +4931,7 @@ fn collect_expr_columns(expr: &sqlparser::ast::Expr, columns: &mut HashSet<Strin
                 && collect_expr_columns(pattern, columns)
                 && escape_char
                     .as_deref()
-                    .map_or(true, |escape| collect_expr_columns(escape, columns))
+                    .is_none_or(|escape| collect_expr_columns(escape, columns))
         }
         Expr::RLike { expr, pattern, .. } => {
             collect_expr_columns(expr, columns) && collect_expr_columns(pattern, columns)
@@ -4976,10 +4971,10 @@ fn collect_expr_columns(expr: &sqlparser::ast::Expr, columns: &mut HashSet<Strin
             collect_expr_columns(expr, columns)
                 && substring_from
                     .as_deref()
-                    .map_or(true, |value| collect_expr_columns(value, columns))
+                    .is_none_or(|value| collect_expr_columns(value, columns))
                 && substring_for
                     .as_deref()
-                    .map_or(true, |value| collect_expr_columns(value, columns))
+                    .is_none_or(|value| collect_expr_columns(value, columns))
         }
         Expr::Trim {
             expr,
@@ -4990,8 +4985,8 @@ fn collect_expr_columns(expr: &sqlparser::ast::Expr, columns: &mut HashSet<Strin
             collect_expr_columns(expr, columns)
                 && trim_what
                     .as_deref()
-                    .map_or(true, |value| collect_expr_columns(value, columns))
-                && trim_characters.as_ref().map_or(true, |values| {
+                    .is_none_or(|value| collect_expr_columns(value, columns))
+                && trim_characters.as_ref().is_none_or(|values| {
                     values
                         .iter()
                         .all(|value| collect_expr_columns(value, columns))
@@ -5008,7 +5003,7 @@ fn collect_expr_columns(expr: &sqlparser::ast::Expr, columns: &mut HashSet<Strin
                 && collect_expr_columns(overlay_from, columns)
                 && overlay_for
                     .as_deref()
-                    .map_or(true, |value| collect_expr_columns(value, columns))
+                    .is_none_or(|value| collect_expr_columns(value, columns))
         }
         Expr::JsonAccess { value, .. } => collect_expr_columns(value, columns),
         Expr::Case {
@@ -5019,14 +5014,14 @@ fn collect_expr_columns(expr: &sqlparser::ast::Expr, columns: &mut HashSet<Strin
         } => {
             operand
                 .as_deref()
-                .map_or(true, |value| collect_expr_columns(value, columns))
+                .is_none_or(|value| collect_expr_columns(value, columns))
                 && conditions.iter().all(|when| {
                     collect_expr_columns(&when.condition, columns)
                         && collect_expr_columns(&when.result, columns)
                 })
                 && else_result
                     .as_deref()
-                    .map_or(true, |value| collect_expr_columns(value, columns))
+                    .is_none_or(|value| collect_expr_columns(value, columns))
         }
         Expr::Tuple(values) => values
             .iter()
@@ -5373,7 +5368,6 @@ fn rewrite_substring(expr: &mut sqlparser::ast::Expr, sql: &str) {
             over: None,
         };
         *expr = sqlparser::ast::Expr::Function(function);
-        return;
     }
 }
 
@@ -5980,9 +5974,9 @@ fn simple_push_predicate(expr: &sqlparser::ast::Expr) -> Option<PushPredicate> {
             right,
         }
         | Expr::BinaryOp {
-            left: right @ _,
+            left: right,
             op: BinaryOperator::NotEq,
-            right: left @ _,
+            right: left,
         } => {
             if let (Some(column), Some(value)) = (column_name(left), literal_scalar(right)) {
                 Some(PushPredicate {
@@ -7206,7 +7200,7 @@ fn scan_code_items(
             row.put(
                 alias,
                 "insns_off",
-                Scalar::Int((code.code_off as i64 + 16) as i64),
+                Scalar::Int(code.code_off as i64 + 16),
             );
             row.put(
                 alias,
@@ -7749,7 +7743,7 @@ fn scan_methods(
             let name = file.method_name(idx);
             let return_descriptor = file.type_descriptor(proto.return_type_idx);
             let param_count = proto.parameters.len() as i64;
-            let needs_descriptor = scan_columns.map_or(true, |columns| {
+            let needs_descriptor = scan_columns.is_none_or(|columns| {
                 columns.contains("descriptor") || columns.contains("method")
             }) || key_filter
                 .is_some_and(|(column, _)| matches!(column, "descriptor" | "method"))
@@ -7968,7 +7962,7 @@ fn scan_fields(
             let name = file.string(field.name_idx).to_owned();
             if let Some((column, values)) = key_filter {
                 let key = match column {
-                    "descriptor" => Scalar::text(file.field_descriptor_ref(idx as u32)),
+                    "descriptor" => Scalar::text(file.field_descriptor_ref(idx)),
                     "class_descriptor" => Scalar::text(class_descriptor.clone()),
                     _ => Scalar::Null,
                 };
@@ -8017,7 +8011,7 @@ fn scan_fields(
                 row.put(
                     alias,
                     "descriptor",
-                    Scalar::text(file.field_descriptor_ref(idx as u32)),
+                    Scalar::text(file.field_descriptor_ref(idx)),
                 );
             }
             push_reference_row(rows, row, &mut retained_bytes)?;
@@ -8653,7 +8647,7 @@ fn scan_encoded_array_values(
                     &mut rows,
                     alias,
                     file.file_id,
-                    off as usize,
+                    off,
                     0,
                     ordinal,
                     None,
@@ -9960,7 +9954,7 @@ fn eval_scalar(
                             }
                         }
                         _ => {
-                            if y >= 64 || y < 0 {
+                            if !(0..64).contains(&y) {
                                 if x < 0 {
                                     -1
                                 } else {
@@ -10076,7 +10070,7 @@ fn eval_scalar(
                 values.push(eval_scalar(characters, row, group)?);
             }
             scalar_functions::eval_scalar_function("trim", &values)
-                .unwrap_or_else(|| Ok(Scalar::Null))
+                .unwrap_or(Ok(Scalar::Null))
         }
         Expr::Function(f) => {
             let name = f

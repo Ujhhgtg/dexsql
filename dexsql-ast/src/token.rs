@@ -295,7 +295,7 @@ pub fn tokenize(sql: &str) -> Result<Vec<Token>, ScanError> {
                             }
                             let digits_end = i;
                             i += 1;
-                            if (digits_end - digits_start) % 2 != 0 {
+                            if !(digits_end - digits_start).is_multiple_of(2) {
                                 return Err(scan_error("malformed blob literal", digits_end));
                             }
                             tokens.push(Token {

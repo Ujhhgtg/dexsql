@@ -566,18 +566,15 @@ pub(super) fn execute(
             let keys = orders
                 .iter()
                 .map(|expr| {
-                    match expr {
-                        Expr::Value(value) => {
-                            if let sqlparser::ast::Value::Number(value, _) = &value.value {
-                                if let Ok(index) = value.parse::<usize>() {
-                                    return values
-                                        .get(index.wrapping_sub(1))
-                                        .cloned()
-                                        .unwrap_or(Scalar::Null);
-                                }
+                    if let Expr::Value(value) = expr {
+                        if let sqlparser::ast::Value::Number(value, _) = &value.value {
+                            if let Ok(index) = value.parse::<usize>() {
+                                return values
+                                    .get(index.wrapping_sub(1))
+                                    .cloned()
+                                    .unwrap_or(Scalar::Null);
                             }
                         }
-                        _ => {}
                     }
                     eval_scalar(expr, &context, &[]).unwrap_or(Scalar::Null)
                 })
