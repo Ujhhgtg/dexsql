@@ -59,6 +59,8 @@ struct MethodFilter {
     param_count_max: Vec<i64>,
     /// Bitwise access-flag conditions: (mask, expected).
     flags: Vec<(i64, i64)>,
+    /// Rejected declaring-class descriptor prefixes (excludePackages).
+    excluded_class_likes: Vec<StringNeed>,
 }
 
 impl MethodFilter {
@@ -78,6 +80,7 @@ impl MethodFilter {
             && self.param_count_min.is_empty()
             && self.param_count_max.is_empty()
             && self.flags.is_empty()
+            && self.excluded_class_likes.is_empty()
     }
 
     fn merge(&mut self, other: MethodFilter) {
@@ -96,6 +99,7 @@ impl MethodFilter {
         self.param_count_min.extend(other.param_count_min);
         self.param_count_max.extend(other.param_count_max);
         self.flags.extend(other.flags);
+        self.excluded_class_likes.extend(other.excluded_class_likes);
     }
 }
 
@@ -130,6 +134,10 @@ enum PredKind {
     /// Inclusive lower/upper bound on an integer column (param_count ranges).
     Gte,
     Lte,
+    /// Negated instr() substring predicate: NOT (instr(column, literal) > 0).
+    NotContains,
+    /// Negated instr() prefix predicate: NOT (instr(column, literal) = 1).
+    NotPrefix,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -308,7 +316,8 @@ fn flatten_and<'a>(expr: &'a Expr, out: &mut Vec<&'a Expr>) {
     }
 }
 
-const SCOPE_COLUMNS: &[&str] = &["file_id", "method_idx", "class_idx", "field_idx"];
+const SCOPE_COLUMNS: &[&str] =
+    &["file_id", "method_idx", "class_idx", "field_idx", "string_pool_id"];
 
 fn parse_predicates(select: &Select) -> Option<(Vec<Pred>, Vec<(String, String)>)> {
     let mut conjuncts = Vec::new();
@@ -416,17 +425,51 @@ fn parse_predicates(select: &Select) -> Option<(Vec<Pred>, Vec<(String, String)>
                 let Expr::Nested(inner) = expr.as_ref() else {
                     return None;
                 };
-                let Expr::BinaryOp {
+                if let Expr::BinaryOp {
                     left,
-                    op: BinaryOperator::And,
+                    op,
                     right,
                     ..
                 } = inner.as_ref()
-                else {
-                    return None;
-                };
-                let pair = distinct_pair(left, right)?;
-                distinct.push(pair);
+                {
+                    // Negated descriptor predicates (DexKit excludePackages):
+                    //   NOT (instr(class_descriptor, 'Lpkg/') = 1)
+                    if let Some(pred) = string_function_predicate(left, right, op) {
+                        let kind = match pred.kind {
+                            PredKind::Prefix => PredKind::NotPrefix,
+                            PredKind::Contains => PredKind::NotContains,
+                            _ => return None,
+                        };
+                        preds.push(Pred {
+                            alias: pred.alias,
+                            column: pred.column,
+                            kind,
+                            value: pred.value,
+                            escape: None,
+                        });
+                        continue;
+                    }
+                    let Expr::BinaryOp {
+                        op: BinaryOperator::And,
+                        ..
+                    } = inner.as_ref()
+                    else {
+                        return None;
+                    };
+                    let Expr::BinaryOp {
+                        left,
+                        op: BinaryOperator::And,
+                        right,
+                        ..
+                    } = inner.as_ref()
+                    else {
+                        return None;
+                    };
+                    let pair = distinct_pair(left, right)?;
+                    distinct.push(pair);
+                    continue;
+                }
+                return None;
             }
             Expr::Function(function) => {
                 preds.push(param_types_match_function_predicate(function)?);
@@ -770,6 +813,7 @@ fn numeric_bound_predicate(left: &Expr, op: &BinaryOperator, right: &Expr) -> Op
 
 fn class_descriptor_need(pred: &Pred) -> Option<StringNeed> {
     match pred.kind {
+        PredKind::NotContains | PredKind::NotPrefix => None,
         PredKind::Like => parse_like_pattern(pred.text()?, pred.escape),
         PredKind::Prefix => Some(StringNeed {
             mode: LikeMode::Prefix,
@@ -850,6 +894,14 @@ fn method_matches(file: &DexFile, method_idx: u32, filter: &MethodFilter) -> boo
     if !filter.class_likes.is_empty()
         && !filter
             .class_likes
+            .iter()
+            .any(|need| plain_like_match(class, need))
+    {
+        return false;
+    }
+    if !filter.excluded_class_likes.is_empty()
+        && filter
+            .excluded_class_likes
             .iter()
             .any(|need| plain_like_match(class, need))
     {
@@ -1127,6 +1179,7 @@ fn add_predicate(filter: &mut MethodFilter, table: &str, pred: &Pred) -> Option<
                 return None;
             }
             match pred.kind {
+                PredKind::NotContains | PredKind::NotPrefix => return None,
                 PredKind::Eq => filter.strings.push(StringNeed {
                     mode: LikeMode::Equal,
                     value: pred.text()?.to_owned(),
@@ -1174,10 +1227,25 @@ fn add_predicate(filter: &mut MethodFilter, table: &str, pred: &Pred) -> Option<
             }
             "class_descriptor" => match pred.kind {
                 PredKind::Eq => filter.classes.push(pred.text()?.to_owned()),
+                PredKind::NotPrefix => {
+                    filter.excluded_class_likes.push(StringNeed {
+                        mode: LikeMode::Prefix,
+                        value: pred.text()?.to_owned(),
+                        case_insensitive: false,
+                    })
+                }
+                PredKind::NotContains => {
+                    filter.excluded_class_likes.push(StringNeed {
+                        mode: LikeMode::Contains,
+                        value: pred.text()?.to_owned(),
+                        case_insensitive: false,
+                    })
+                }
                 PredKind::Flags(_) => return None,
                 _ => filter.class_likes.push(class_descriptor_need(pred)?),
             },
             "return_descriptor" => match pred.kind {
+                PredKind::NotContains | PredKind::NotPrefix => return None,
                 PredKind::Eq => filter.returns.push(StringNeed {
                     mode: LikeMode::Equal,
                     value: pred.text()?.to_owned(),
@@ -1369,6 +1437,251 @@ fn is_superclass_unit_join(columns: &JoinColumns, methods_alias: &str) -> bool {
         || (methods_side(&columns.1 .0, &columns.1 .1) && other_side(&columns.0 .1))
 }
 
+fn is_annotation_owner_join(columns: &JoinColumns, base_alias: &str) -> Option<String> {
+    // annotation_elements_resolved.owner = <base>.class_descriptor
+    let base_side = |alias: &Option<String>, column: &str| {
+        column == "class_descriptor" && alias.as_deref() == Some(base_alias)
+    };
+    let owner_side = |alias: &Option<String>, column: &str| column == "owner" && alias.is_some();
+    if owner_side(&columns.0 .0, &columns.0 .1) && base_side(&columns.1 .0, &columns.1 .1) {
+        return columns.0 .0.clone();
+    }
+    if owner_side(&columns.1 .0, &columns.1 .1) && base_side(&columns.0 .0, &columns.0 .1) {
+        return columns.1 .0.clone();
+    }
+    None
+}
+
+fn is_same_column_join(
+    columns: &JoinColumns,
+    column: &str,
+    known: &[String],
+) -> Option<(String, String)> {
+    let (left_alias, left_column) = (&columns.0 .0, &columns.0 .1);
+    let (right_alias, right_column) = (&columns.1 .0, &columns.1 .1);
+    if left_column != column || right_column != column {
+        return None;
+    }
+    let left = left_alias.clone()?;
+    let right = right_alias.clone()?;
+    if known.contains(&right) && !known.contains(&left) {
+        return Some((left, right));
+    }
+    if known.contains(&left) && !known.contains(&right) {
+        return Some((right, left));
+    }
+    None
+}
+
+fn is_string_index_join(columns: &JoinColumns, known: &[String]) -> Option<(String, String)> {
+    let left = (columns.0 .0.clone()?, columns.0 .1.as_str());
+    let right = (columns.1 .0.clone()?, columns.1 .1.as_str());
+    let matches = |string_column: &str, index_column: &str| {
+        (string_column == "string_idx" && index_column == "value_index")
+            || (string_column == "value_index" && index_column == "string_idx")
+    };
+    if matches(left.1, right.1) {
+        if known.contains(&right.0) && !known.contains(&left.0) {
+            return Some((left.0, right.0));
+        }
+        if known.contains(&left.0) && !known.contains(&right.0) {
+            return Some((right.0, left.0));
+        }
+    }
+    None
+}
+
+/// One class-annotation constraint of a method lookup: annotation type, visibility and (for an
+/// array-valued template) the ordered expected string values.
+#[derive(Debug, Clone, Default)]
+struct AnnotationUnit {
+    annotation: Option<String>,
+    visibility: Option<i64>,
+    element_name: Option<String>,
+    /// Expected ordered array strings; empty means the annotation only has to be present.
+    values: Vec<Option<String>>,
+}
+
+fn annotation_unit_matches(annotations: &[serde_json::Value], unit: &AnnotationUnit) -> bool {
+    annotations.iter().any(|annotation| {
+        let Some(object) = annotation.as_object() else {
+            return false;
+        };
+        if let Some(expected) = &unit.annotation {
+            if object.get("type").and_then(serde_json::Value::as_str) != Some(expected.as_str()) {
+                return false;
+            }
+        }
+        if let Some(visibility) = unit.visibility {
+            let expected = match visibility {
+                0 => "build",
+                1 => "runtime",
+                2 => "system",
+                _ => return false,
+            };
+            if object.get("visibility").and_then(serde_json::Value::as_str) != Some(expected) {
+                return false;
+            }
+        }
+        let Some(element_name) = &unit.element_name else {
+            return true;
+        };
+        let Some(elements) = object.get("elements").and_then(serde_json::Value::as_array) else {
+            return false;
+        };
+        let Some(element) = elements.iter().find(|element| {
+            element
+                .as_object()
+                .and_then(|element| element.get("name"))
+                .and_then(serde_json::Value::as_str)
+                == Some(element_name.as_str())
+        }) else {
+            return false;
+        };
+        let expected_values: Vec<&str> = unit
+            .values
+            .iter()
+            .map(|value| value.as_deref().unwrap_or_default())
+            .collect();
+        let Some(actual) = element
+            .as_object()
+            .and_then(|element| element.get("value"))
+            .and_then(serde_json::Value::as_array)
+        else {
+            return false;
+        };
+        actual.len() == expected_values.len()
+            && actual
+                .iter()
+                .zip(expected_values.iter())
+                .all(|(actual, expected)| actual.as_str() == Some(*expected))
+    })
+}
+
+fn method_matches_annotation_units(
+    file: &DexFile,
+    method_idx: u32,
+    units: &[AnnotationUnit],
+) -> bool {
+    let Some(method) = file.methods.get(method_idx as usize) else {
+        return false;
+    };
+    let Some(class) = file.class_for_type_idx(method.class_idx as u32) else {
+        return false;
+    };
+    let Ok(annotations) = dexsql_cache::annotations::class_annotations(file, class) else {
+        return false;
+    };
+    let Some(annotations) = annotations.as_array() else {
+        return false;
+    };
+    units
+        .iter()
+        .all(|unit| annotation_unit_matches(annotations, unit))
+}
+
+fn collect_annotation_units(
+    annotation_aliases: &[String],
+    annotation_element_aliases: &[(String, String)],
+    annotation_string_aliases: &[(String, String, String)],
+    predicates: &[Pred],
+) -> Result<Vec<AnnotationUnit>, String> {
+    let mut units = vec![AnnotationUnit::default(); annotation_aliases.len()];
+    let mut element_ordinals: Vec<i64> = vec![-1; annotation_element_aliases.len()];
+    for pred in predicates {
+        let Some(alias) = pred.alias.as_deref() else {
+            continue;
+        };
+        if let Some(index) = annotation_aliases.iter().position(|value| value == alias) {
+            match pred.column.as_str() {
+                "owner_kind" => {
+                    if !matches!(pred.kind, PredKind::Eq) || pred.text() != Some("class") {
+                        return Err("unsupported annotation owner kind".into());
+                    }
+                }
+                "annotation" if matches!(pred.kind, PredKind::Eq) => {
+                    units[index].annotation =
+                        Some(pred.text().ok_or("bad annotation type")?.to_owned());
+                }
+                "visibility" if matches!(pred.kind, PredKind::Eq) => {
+                    units[index].visibility = Some(pred.int().ok_or("bad annotation visibility")?);
+                }
+                "element_name" if matches!(pred.kind, PredKind::Eq) => {
+                    units[index].element_name =
+                        Some(pred.text().ok_or("bad annotation element name")?.to_owned());
+                }
+                "value_kind" => {
+                    let value = pred.text().ok_or("bad annotation value kind")?;
+                    if value != "array" {
+                        return Err("unsupported annotation element value kind".into());
+                    }
+                }
+                "file_id" => {}
+                _ => return Err("unsupported annotation predicate".into()),
+            }
+            continue;
+        }
+        if let Some(index) = annotation_element_aliases
+            .iter()
+            .position(|(element, _)| element == alias)
+        {
+            match pred.column.as_str() {
+                "depth" => {
+                    if !matches!(pred.kind, PredKind::Eq) || pred.int() != Some(1) {
+                        return Err("unsupported annotation element depth".into());
+                    }
+                }
+                "ordinal" if matches!(pred.kind, PredKind::Eq) => {
+                    element_ordinals[index] = pred.int().ok_or("bad annotation ordinal")?;
+                }
+                "value_kind" => {
+                    if pred.text() != Some("string") {
+                        return Err("unsupported annotation element value kind".into());
+                    }
+                }
+                "file_id" => {}
+                _ => return Err("unsupported annotation element predicate".into()),
+            }
+            continue;
+        }
+        if let Some(index) = annotation_string_aliases
+            .iter()
+            .position(|(string, _, _)| string == alias)
+        {
+            if pred.column != "value" || !matches!(pred.kind, PredKind::Eq) {
+                return Err("unsupported annotation string predicate".into());
+            }
+            let (_, element, owner) = &annotation_string_aliases[index];
+            let element_index = annotation_element_aliases
+                .iter()
+                .position(|(alias, _)| alias == element)
+                .ok_or("annotation string without element")?;
+            let owner_index = annotation_aliases
+                .iter()
+                .position(|value| value == owner)
+                .ok_or("annotation element without owner")?;
+            let ordinal = element_ordinals[element_index];
+            if ordinal < 0 {
+                return Err("annotation string without ordinal".into());
+            }
+            let value = pred.text().ok_or("bad annotation string value")?;
+            let unit = &mut units[owner_index];
+            if unit.values.len() <= ordinal as usize {
+                unit.values.resize(ordinal as usize + 1, None);
+            }
+            unit.values[ordinal as usize] = Some(value.to_owned());
+        }
+    }
+    for unit in &units {
+        if unit.element_name.is_some()
+            && (unit.values.is_empty() || unit.values.iter().any(Option::is_none))
+        {
+            return Err("incomplete annotation array constraint".into());
+        }
+    }
+    Ok(units)
+}
+
 fn run_method_lookup(
     ds: &Dataset,
     base_alias: &str,
@@ -1387,6 +1700,10 @@ fn run_method_lookup(
     let mut literal_aliases: Vec<(String, String)> = Vec::new();
     let mut class_unit_aliases: Vec<String> = Vec::new();
     let mut access_aliases: Vec<String> = Vec::new();
+    let mut annotation_aliases: Vec<String> = Vec::new();
+    let mut annotation_element_aliases: Vec<(String, String)> = Vec::new();
+    let mut annotation_string_aliases: Vec<(String, String, String)> = Vec::new();
+    let mut annotation_dex_aliases: Vec<(String, String)> = Vec::new();
     for (index, columns) in joins.iter().enumerate() {
         let factor = &factors[index + 1];
         match factor.table.as_str() {
@@ -1420,6 +1737,56 @@ fn run_method_lookup(
                 }
                 access_aliases.push(factor.alias.clone());
             }
+            "annotation_elements_resolved" => {
+                if is_annotation_owner_join(columns, base_alias).as_deref()
+                    != Some(factor.alias.as_str())
+                {
+                    return Err("unsupported annotation owner join".into());
+                }
+                annotation_aliases.push(factor.alias.clone());
+            }
+            "annotation_elements" => {
+                let Some((alias, owner)) =
+                    is_same_column_join(columns, "annotation_off", &annotation_aliases)
+                else {
+                    return Err("unsupported annotation element join".into());
+                };
+                if alias != factor.alias {
+                    return Err("unsupported annotation element alias".into());
+                }
+                annotation_element_aliases.push((alias, owner));
+            }
+            "dex_files" => {
+                let known: Vec<String> = annotation_element_aliases
+                    .iter()
+                    .map(|(alias, _)| alias.clone())
+                    .collect();
+                let Some((alias, owner)) = is_same_column_join(columns, "file_id", &known) else {
+                    return Err("unsupported annotation dex file join".into());
+                };
+                if alias != factor.alias {
+                    return Err("unsupported annotation dex file alias".into());
+                }
+                annotation_dex_aliases.push((alias, owner));
+            }
+            "strings" => {
+                let known: Vec<String> = annotation_element_aliases
+                    .iter()
+                    .map(|(alias, _)| alias.clone())
+                    .collect();
+                let Some((alias, owner)) = is_string_index_join(columns, &known) else {
+                    return Err("unsupported annotation string join".into());
+                };
+                if alias != factor.alias {
+                    return Err("unsupported annotation string alias".into());
+                }
+                let owner_of_owner = annotation_element_aliases
+                    .iter()
+                    .find(|(element, _)| element == &owner)
+                    .map(|(_, annotation)| annotation.clone())
+                    .ok_or("annotation string without element")?;
+                annotation_string_aliases.push((alias, owner, owner_of_owner));
+            }
             _ => return Err("unsupported fast lookup join".into()),
         }
     }
@@ -1449,6 +1816,12 @@ fn run_method_lookup(
             unit_filters[index].merge(part);
         }
     }
+    let annotation_units = collect_annotation_units(
+        &annotation_aliases,
+        &annotation_element_aliases,
+        &annotation_string_aliases,
+        predicates,
+    )?;
     if constructor && !filter.names.iter().any(|name| name == "<init>") {
         filter.names.push("<init>".to_owned());
     }
@@ -1514,6 +1887,23 @@ fn run_method_lookup(
                         file.methods
                             .get(*method as usize)
                             .is_some_and(|info| allowed.contains(&(info.class_idx as u32)))
+                    })
+                    .collect()
+            })
+            .collect()
+    };
+    let files: Vec<Vec<u32>> = if annotation_units.is_empty() {
+        files
+    } else {
+        ds.files
+            .iter()
+            .zip(files.iter())
+            .map(|(file, methods)| {
+                methods
+                    .iter()
+                    .copied()
+                    .filter(|method| {
+                        method_matches_annotation_units(file, *method, &annotation_units)
                     })
                     .collect()
             })
@@ -2730,6 +3120,56 @@ mod tests {
             fast.is_some(),
             "opcode_count method lookup must use the fast path"
         );
+    }
+
+    #[test]
+    fn accepts_declared_class_annotation_units() {
+        // Shape emitted by WeKit's declaredClass { annotation { ... } } matcher: class-owner
+        // annotation resolution joined through annotation elements and their string array values.
+        let sql = "SELECT DISTINCT m.descriptor AS method FROM methods m \
+             JOIN annotation_elements_resolved ar0 ON ar0.owner = m.class_descriptor \
+             JOIN annotation_elements ae0_0 ON ae0_0.annotation_off = ar0.annotation_off \
+             JOIN dex_files d0_0 ON d0_0.file_id = ae0_0.file_id \
+             JOIN strings s0_0 ON s0_0.string_idx = ae0_0.value_index \
+             WHERE m.name = 'callback' AND m.param_count = 1 AND m.return_descriptor = 'Z' \
+               AND ar0.owner_kind = 'class' \
+               AND ar0.annotation = 'Ldalvik/annotation/Signature;' \
+               AND ar0.visibility = 2 AND ar0.element_name = 'value' \
+               AND ar0.value_kind = 'array' AND ae0_0.file_id = ar0.file_id \
+               AND ae0_0.depth = 1 AND ae0_0.ordinal = 0 \
+               AND ae0_0.value_kind = 'string' \
+               AND s0_0.string_pool_id = d0_0.string_pool_id \
+               AND s0_0.value = 'Ljava/lang/Object;' \
+             ORDER BY m.descriptor;";
+        let fast = try_fast_descriptor_lookup(&parse(sql), &Dataset::default(), None);
+        assert!(
+            fast.is_some(),
+            "declared-class annotation unit must use the fast path"
+        );
+    }
+
+    #[test]
+    fn accepts_declared_class_annotation_with_exclude_packages() {
+        // VoIP multitalk V2 shape: class annotation + searchPackages + excluded subpackage.
+        let sql = "SELECT DISTINCT m.descriptor AS method FROM methods m \
+             JOIN annotation_elements_resolved ar0 ON ar0.owner = m.class_descriptor \
+             JOIN annotation_elements ae0_0 ON ae0_0.annotation_off = ar0.annotation_off \
+             JOIN dex_files d0_0 ON d0_0.file_id = ae0_0.file_id \
+             JOIN strings s0_0 ON s0_0.string_idx = ae0_0.value_index \
+             WHERE m.name = 'callback' AND m.param_count = 1 AND m.return_descriptor = 'Z' \
+               AND instr(m.class_descriptor, 'Lcom/tencent/mm/voipmp/v2/') = 1 \
+               AND NOT (instr(m.class_descriptor, 'Lcom/tencent/mm/voipmp/v2/multitalk/') = 1) \
+               AND ar0.owner_kind = 'class' \
+               AND ar0.annotation = 'Ldalvik/annotation/Signature;' \
+               AND ar0.visibility = 2 AND ar0.element_name = 'value' \
+               AND ar0.value_kind = 'array' AND ae0_0.file_id = ar0.file_id \
+               AND ae0_0.depth = 1 AND ae0_0.ordinal = 0 \
+               AND ae0_0.value_kind = 'string' \
+               AND s0_0.string_pool_id = d0_0.string_pool_id \
+               AND s0_0.value = 'Ljava/lang/Object;' \
+             ORDER BY m.descriptor;";
+        let fast = try_fast_descriptor_lookup(&parse(sql), &Dataset::default(), None);
+        assert!(fast.is_some(), "annotation + exclude packages must use the fast path");
     }
 
     #[test]
