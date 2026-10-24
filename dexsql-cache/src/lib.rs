@@ -17,6 +17,7 @@ use rustc_hash::FxHashMap;
 use sha2::{Digest, Sha256};
 
 pub mod decode;
+pub mod annotations;
 pub mod metadata;
 
 pub use metadata::MetaQuery;
