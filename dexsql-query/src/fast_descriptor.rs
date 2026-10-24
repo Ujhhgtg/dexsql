@@ -456,8 +456,10 @@ fn distinct_pair(left: &Expr, right: &Expr) -> Option<(String, String)> {
     let ((left_alias_b, left_column_b), (right_alias_b, right_column_b)) = eq_aliases(right)?;
     let same_aliases = left_alias_a == left_alias_b && right_alias_a == right_alias_b;
     let file_columns = left_column_a == "file_id" && right_column_a == "file_id";
-    let method_columns = left_column_b == "method_idx" && right_column_b == "method_idx";
-    if !same_aliases || !file_columns || !method_columns {
+    // Injective method units are distinct by method_idx; declared-field units by field_idx.
+    let identity_columns = (left_column_b == "method_idx" && right_column_b == "method_idx")
+        || (left_column_b == "field_idx" && right_column_b == "field_idx");
+    if !same_aliases || !file_columns || !identity_columns {
         return None;
     }
     if left_alias_a == right_alias_a {
@@ -1941,9 +1943,11 @@ fn run_bare_class_lookup(
     cli_limit: Option<u64>,
 ) -> Result<QueryResult, String> {
     // Bare class queries join superclass literal units directly on the matched
-    // class's superclass_descriptor (no classes intermediate alias).
+    // class's superclass_descriptor (no classes intermediate alias), and declared
+    // field units directly on the matched class's class_fields rows.
     let mut superunit_aliases: Vec<String> = Vec::new();
     let mut literal_aliases: Vec<(String, String)> = Vec::new();
+    let mut class_field_aliases: Vec<String> = Vec::new();
     for (index, columns) in joins.iter().enumerate() {
         let factor = &factors[index + 1];
         match factor.table.as_str() {
@@ -1966,6 +1970,17 @@ fn run_bare_class_lookup(
                 }
                 superunit_aliases.push(factor.alias.clone());
             }
+            "class_fields" => {
+                if !is_class_field_join(columns) {
+                    return Err("unsupported bare class join".into());
+                }
+                let other = other_join_alias(columns, &factor.alias)
+                    .ok_or("unsupported bare class field join")?;
+                if other != base_alias {
+                    return Err("unsupported bare class field anchor".into());
+                }
+                class_field_aliases.push(factor.alias.clone());
+            }
             _ => return Err("unsupported bare class join".into()),
         }
     }
@@ -1976,6 +1991,10 @@ fn run_bare_class_lookup(
     let mut class_flags: Vec<(i64, i64)> = Vec::new();
     let mut field_count_min: Option<i64> = None;
     let mut field_count_max: Option<i64> = None;
+    let mut interface_count_min: Option<i64> = None;
+    let mut interface_count_max: Option<i64> = None;
+    let mut class_field_units: Vec<ClassFieldUnit> =
+        vec![ClassFieldUnit::default(); class_field_aliases.len()];
     for pred in predicates {
         let Some(alias) = pred.alias.as_deref() else {
             return Err("unsupported bare class predicate".into());
@@ -2021,7 +2040,45 @@ fn run_bare_class_lookup(
                         _ => return Err("unsupported field_count predicate".into()),
                     }
                 }
+                "interface_count" => {
+                    let value = pred.int().ok_or("bad interface_count predicate")?;
+                    match pred.kind {
+                        PredKind::Eq => {
+                            interface_count_min = Some(value);
+                            interface_count_max = Some(value);
+                        }
+                        PredKind::Gte => interface_count_min = Some(value),
+                        PredKind::Lte => interface_count_max = Some(value),
+                        _ => return Err("unsupported interface_count predicate".into()),
+                    }
+                }
                 _ => return Err("unsupported bare class predicate".into()),
+            }
+            continue;
+        }
+        if let Some(index) = class_field_aliases.iter().position(|unit| unit == alias) {
+            match pred.column.as_str() {
+                "field_name" if matches!(pred.kind, PredKind::Eq) => {
+                    class_field_units[index].name =
+                        Some(pred.text().ok_or("bad class field name predicate")?.to_owned());
+                }
+                "field_descriptor" if matches!(pred.kind, PredKind::Contains) => {
+                    let literal = pred.text().ok_or("bad class field type predicate")?;
+                    let Some(field_type) = literal.strip_prefix(':') else {
+                        return Err("unsupported class field descriptor predicate".into());
+                    };
+                    class_field_units[index].field_type = Some(field_type.to_owned());
+                }
+                "access_flags" => match pred.kind {
+                    PredKind::Flags(mask) => {
+                        class_field_units[index]
+                            .flags
+                            .push((mask, pred.int().ok_or("bad class field flag predicate")?))
+                    }
+                    _ => return Err("unsupported class field predicate".into()),
+                },
+                "file_id" | "field_idx" => {}
+                _ => return Err("unsupported class field predicate".into()),
             }
             continue;
         }
@@ -2138,6 +2195,17 @@ fn run_bare_class_lookup(
                     {
                         return false;
                     }
+                    let interface_count = class.interfaces.len() as i64;
+                    if interface_count_min.is_some_and(|minimum| interface_count < minimum)
+                        || interface_count_max.is_some_and(|maximum| interface_count > maximum)
+                    {
+                        return false;
+                    }
+                    if !class_field_units.is_empty()
+                        && !class_fields_match(file, class, &class_field_units)
+                    {
+                        return false;
+                    }
                     if !superunits.is_empty() {
                         for set in &unit_allowed {
                             let Some(super_idx) = class.superclass_idx else {
@@ -2186,6 +2254,75 @@ struct RelationAccessFilter {
     field_names: Vec<String>,
     field_types: Vec<String>,
     using_types: Vec<String>,
+}
+
+/// One declared-field unit of a bare-class lookup: the class must declare a
+/// field matching every predicate, and units are matched injectively.
+#[derive(Debug, Clone, Default)]
+struct ClassFieldUnit {
+    name: Option<String>,
+    field_type: Option<String>,
+    flags: Vec<(i64, i64)>,
+}
+
+fn is_class_field_join(columns: &JoinColumns) -> bool {
+    (columns.0 .1 == "class_descriptor" && columns.1 .1 == "descriptor")
+        || (columns.0 .1 == "descriptor" && columns.1 .1 == "class_descriptor")
+}
+
+/// Injective matching of declared-field units against one class's field list.
+fn class_fields_match(
+    file: &DexFile,
+    class: &dexsql_cache::ClassInfo,
+    units: &[ClassFieldUnit],
+) -> bool {
+    fn match_unit(
+        file: &DexFile,
+        class: &dexsql_cache::ClassInfo,
+        units: &[ClassFieldUnit],
+        index: usize,
+        used: &mut HashSet<u32>,
+    ) -> bool {
+        if index == units.len() {
+            return true;
+        }
+        let unit = &units[index];
+        for field in &class.fields {
+            if used.contains(&field.field_idx) {
+                continue;
+            }
+            let descriptor = file.field_descriptor_ref(field.field_idx);
+            let Some((name, field_type)) = field_descriptor_parts(descriptor) else {
+                continue;
+            };
+            if unit.name.as_deref().is_some_and(|value| value != name) {
+                continue;
+            }
+            if unit
+                .field_type
+                .as_deref()
+                .is_some_and(|value| value != field_type)
+            {
+                continue;
+            }
+            let flags = field.access_flags as i64;
+            if !unit
+                .flags
+                .iter()
+                .all(|(mask, expected)| flags & mask == *expected)
+            {
+                continue;
+            }
+            used.insert(field.field_idx);
+            if match_unit(file, class, units, index + 1, used) {
+                return true;
+            }
+            used.remove(&field.field_idx);
+        }
+        false
+    }
+    let mut used = HashSet::new();
+    match_unit(file, class, units, 0, &mut used)
 }
 
 /** Split a field descriptor ("Lpkg/Class;->name:Type;") into its name and type descriptor. */
@@ -2610,6 +2747,27 @@ mod tests {
         assert!(
             fast.is_some(),
             "method field-access type predicate must use the fast path"
+        );
+    }
+
+    #[test]
+    fn accepts_bare_class_declared_field_units() {
+        // Shape emitted by WeKit's class-level field { } matchers: class_fields joins with
+        // name/type/flags predicates and pairwise distinctness conditions.
+        let sql = "SELECT DISTINCT c.descriptor AS descriptor FROM classes c \
+             JOIN class_fields cf0 ON cf0.class_descriptor = c.descriptor \
+             JOIN class_fields cf1 ON cf1.class_descriptor = c.descriptor \
+             WHERE instr(c.descriptor, 'Lcom/tencent/mm/storage/') = 1 \
+               AND c.interface_count >= 0 AND c.interface_count <= 2 \
+               AND ((cf0.access_flags & 8) = 8) AND cf0.field_name = 'field_UserName' \
+               AND instr(cf0.field_descriptor, ':Ljava/lang/String;') > 0 \
+               AND cf1.field_name = 'field_StatusID' \
+               AND NOT (cf0.file_id = cf1.file_id AND cf0.field_idx = cf1.field_idx) \
+             ORDER BY c.descriptor;";
+        let fast = try_fast_descriptor_lookup(&parse(sql), &Dataset::default(), None);
+        assert!(
+            fast.is_some(),
+            "bare class declared-field units must use the fast path"
         );
     }
 
