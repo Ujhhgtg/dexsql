@@ -1,0 +1,17 @@
+[package]
+name = "dexsql-query"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+dexsql-ast = { path = "../dexsql-ast" }
+dexsql-cache = { path = "../dexsql-cache" }
+dexsql-schema = { path = "../dexsql-schema" }
+dexsql-exec = { path = "../dexsql-exec" }
+dexsql-lower = { path = "../dexsql-lower" }
+dexsql-optimizer = { path = "../dexsql-optimizer" }
+sqlparser = "0.63"
+rayon = "1.12.0"
+rustc-hash = "2.1.3"

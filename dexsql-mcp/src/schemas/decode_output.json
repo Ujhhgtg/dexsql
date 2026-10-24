@@ -1,0 +1,193 @@
+{
+  "$defs": {
+    "DecodeMode": {
+      "description": "Which `decode` view a request asks for. A class selection defaults to [`Self::Summary`] and a\nmethod selection to [`Self::Smali`] (see [`run`]).\n\n`JsonSchema` is derived here for the same reason as `apk::manifest::ManifestMode`: the MCP tool's\nparameter schema is generated from this type (it is re-exported as\n`cli::mcp::protocol::DecodeMode`), so the published schema and the implemented behaviour cannot\ndisagree.",
+      "oneOf": [
+        {
+          "const": "summary",
+          "description": "Method METADATA only: descriptor, access flags, code units, registers, try count.",
+          "type": "string"
+        },
+        {
+          "const": "smali",
+          "description": "The complete smali text of each selected method, paged by UTF-8 byte offset.",
+          "type": "string"
+        },
+        {
+          "const": "context",
+          "description": "The smali text with every original label/catch/method line prefixed by its zero-based line\nnumber — the view a caller uses to talk about a line it saw somewhere else.",
+          "type": "string"
+        }
+      ]
+    },
+    "MethodOutput": {
+      "properties": {
+        "access_flags": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "code_units": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "declaration": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "descriptor": {
+          "type": "string"
+        },
+        "end_line": {
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "ends_mid_line": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "file_id": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "method_idx": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "next_offset": {
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "offset": {
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "registers": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "smali": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "start_line": {
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "starts_mid_line": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "total_bytes": {
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "total_lines": {
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "try_count": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "file_id",
+        "method_idx",
+        "descriptor"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "dataset_id": {
+      "type": "string"
+    },
+    "method_offset": {
+      "format": "uint",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "methods": {
+      "items": {
+        "$ref": "#/$defs/MethodOutput"
+      },
+      "type": "array"
+    },
+    "mode": {
+      "$ref": "#/$defs/DecodeMode"
+    },
+    "next_method_offset": {
+      "format": "uint",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "total_methods": {
+      "format": "uint",
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "dataset_id",
+    "mode",
+    "total_methods",
+    "method_offset",
+    "methods"
+  ],
+  "title": "DecodeOutput",
+  "type": "object"
+}

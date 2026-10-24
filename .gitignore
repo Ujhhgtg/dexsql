@@ -1,0 +1,10 @@
+/target/
+*.dxc2
+work/
+__pycache__/
+*.pyc
+fixtures/
+tools/
+artifacts/
+
+/.claude/

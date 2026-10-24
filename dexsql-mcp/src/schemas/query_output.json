@@ -1,0 +1,449 @@
+{
+  "$defs": {
+    "Cell": {
+      "oneOf": [
+        {
+          "properties": {
+            "type": {
+              "const": "null",
+              "type": "string"
+            },
+            "value": {
+              "type": "null"
+            }
+          },
+          "required": [
+            "type",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "const": "int64",
+              "type": "string"
+            },
+            "value": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "const": "uint64",
+              "type": "string"
+            },
+            "value": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "const": "float64",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/FloatValue"
+            }
+          },
+          "required": [
+            "type",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "const": "utf8",
+              "type": "string"
+            },
+            "value": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "const": "binary",
+              "type": "string"
+            },
+            "value": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "value"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "Column": {
+      "properties": {
+        "data_type": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "nullable": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "name",
+        "data_type",
+        "nullable"
+      ],
+      "type": "object"
+    },
+    "CompactStatement": {
+      "properties": {
+        "columns": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "execute_ms": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "kind": {
+          "type": "string"
+        },
+        "next_offset": {
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "offset": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "rows": {
+          "items": {
+            "items": {
+              "description": "null = SQL NULL; string = UTF-8; number = finite float64; tagged pairs preserve other runtime types, including mixed columns",
+              "oneOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "number"
+                },
+                {
+                  "maxItems": 2,
+                  "minItems": 2,
+                  "prefixItems": [
+                    {
+                      "const": "i"
+                    },
+                    {
+                      "pattern": "^-?[0-9]+$",
+                      "type": "string"
+                    }
+                  ],
+                  "type": "array"
+                },
+                {
+                  "maxItems": 2,
+                  "minItems": 2,
+                  "prefixItems": [
+                    {
+                      "const": "u"
+                    },
+                    {
+                      "pattern": "^[0-9]+$",
+                      "type": "string"
+                    }
+                  ],
+                  "type": "array"
+                },
+                {
+                  "maxItems": 2,
+                  "minItems": 2,
+                  "prefixItems": [
+                    {
+                      "const": "b"
+                    },
+                    {
+                      "pattern": "^([0-9a-f]{2})*$",
+                      "type": "string"
+                    }
+                  ],
+                  "type": "array"
+                },
+                {
+                  "maxItems": 2,
+                  "minItems": 2,
+                  "prefixItems": [
+                    {
+                      "const": "f"
+                    },
+                    {
+                      "enum": [
+                        "NaN",
+                        "Infinity",
+                        "-Infinity"
+                      ]
+                    }
+                  ],
+                  "type": "array"
+                }
+              ]
+            },
+            "type": "array"
+          },
+          "type": "array"
+        },
+        "statement_index": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "total_rows": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "statement_index",
+        "kind",
+        "columns",
+        "rows",
+        "total_rows",
+        "truncated",
+        "offset"
+      ],
+      "type": "object"
+    },
+    "Diagnostic": {
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "message"
+      ],
+      "type": "object"
+    },
+    "FloatValue": {
+      "anyOf": [
+        {
+          "format": "double",
+          "type": "number"
+        },
+        {
+          "$ref": "#/$defs/SpecialFloat"
+        }
+      ]
+    },
+    "SpecialFloat": {
+      "enum": [
+        "NaN",
+        "Infinity",
+        "-Infinity"
+      ],
+      "type": "string"
+    },
+    "Statement": {
+      "properties": {
+        "columns": {
+          "items": {
+            "$ref": "#/$defs/Column"
+          },
+          "type": "array"
+        },
+        "execute_ms": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "kind": {
+          "type": "string"
+        },
+        "next_offset": {
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "offset": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "rows": {
+          "items": {
+            "items": {
+              "$ref": "#/$defs/Cell"
+            },
+            "type": "array"
+          },
+          "type": "array"
+        },
+        "sql": {
+          "type": "string"
+        },
+        "sql_truncated": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "statement_index": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "total_rows": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "statement_index",
+        "sql",
+        "kind",
+        "columns",
+        "rows",
+        "total_rows",
+        "truncated",
+        "offset"
+      ],
+      "type": "object"
+    },
+    "Timing": {
+      "properties": {
+        "cache_total_ms": {
+          "format": "double",
+          "type": "number"
+        },
+        "load_inputs_ms": {
+          "format": "double",
+          "type": "number"
+        },
+        "parse_ms": {
+          "format": "double",
+          "type": "number"
+        },
+        "sql_wall_ms": {
+          "format": "double",
+          "type": "number"
+        },
+        "table_build_ms": {
+          "format": "double",
+          "type": "number"
+        },
+        "total_ms": {
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "total_ms",
+        "load_inputs_ms",
+        "parse_ms",
+        "table_build_ms",
+        "cache_total_ms",
+        "sql_wall_ms"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "dataset_id": {
+      "type": "string"
+    },
+    "diagnostics": {
+      "items": {
+        "$ref": "#/$defs/Diagnostic"
+      },
+      "type": "array"
+    },
+    "statements": {
+      "anyOf": [
+        {
+          "items": {
+            "$ref": "#/$defs/Statement"
+          },
+          "type": "array"
+        },
+        {
+          "items": {
+            "$ref": "#/$defs/CompactStatement"
+          },
+          "type": "array"
+        }
+      ]
+    },
+    "timing": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Timing"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "required": [
+    "dataset_id",
+    "statements",
+    "diagnostics"
+  ],
+  "title": "QueryOutput",
+  "type": "object"
+}
