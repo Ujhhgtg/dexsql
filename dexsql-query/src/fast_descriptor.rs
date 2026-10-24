@@ -2393,10 +2393,21 @@ fn run_class_lookup(
             // generic methods scan, which also exposes classes that the input
             // DEX only references (they have method ids but no class definition).
             let mut classes = classes.unwrap_or_else(|| {
-                file.methods_by_class
-                    .keys()
-                    .copied()
-                    .collect::<HashSet<u32>>()
+                // Metadata-only Engine loads intentionally omit the large
+                // methods_by_class side index. Fall back to the dense method
+                // id table so class-projected fast lookups retain parity
+                // without forcing that index into every session.
+                if file.methods_by_class.is_empty() {
+                    file.methods
+                        .iter()
+                        .map(|method| method.class_idx as u32)
+                        .collect::<HashSet<u32>>()
+                } else {
+                    file.methods_by_class
+                        .keys()
+                        .copied()
+                        .collect::<HashSet<u32>>()
+                }
             });
             if !injective_units.is_empty() {
                 // Only the nested method-matcher units listed in the pairwise

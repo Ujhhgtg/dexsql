@@ -29,11 +29,14 @@ pub struct QueryResult {
     pub rows: Vec<Vec<String>>,
 }
 
+mod correlated;
 mod error;
 mod fast_descriptor;
+mod membership;
 #[cfg(test)]
 mod memory_plan_tests;
 mod param_pattern;
+mod relational;
 mod scalar_functions;
 mod streaming;
 
@@ -2284,14 +2287,7 @@ impl Scalar {
     }
 
     fn sql_eq(&self, other: &Self) -> bool {
-        if let (Some(a), Some(b)) = (self.numeric(), other.numeric()) {
-            return a == b;
-        }
-        // BLOBs compare type-strictly by raw bytes.
-        if matches!(self, Self::Blob(_)) || matches!(other, Self::Blob(_)) {
-            return matches!((self, other), (Self::Blob(a), Self::Blob(b)) if a == b);
-        }
-        matches!((self, other), (Self::Null, Self::Null)) || self.display() == other.display()
+        membership::equal(self, other)
     }
 }
 
@@ -4113,6 +4109,7 @@ fn execute_query_rows(
     cli_limit: Option<u64>,
     needs_method_opcode: bool,
 ) -> Result<SetRows, String> {
+    let _membership_scope = membership::Scope::new();
     use sqlparser::ast::SetExpr;
     let scope = match query.with.as_ref() {
         Some(with) => Some(prepare_with_scope(with, ds, source_dataset, named_caches)?),
@@ -4123,7 +4120,8 @@ fn execute_query_rows(
         SetExpr::Select(select) => {
             let mut select = select.clone();
             desugar_select(&mut select, ds, source_dataset, caches)?;
-            let streaming = streaming::execute(query, &select, ds, caches, cli_limit);
+            let streaming = streaming::execute(query, &select, ds, caches, cli_limit)
+                .or_else(|| relational::execute(query, &select, ds, caches, cli_limit));
             let mut projected = if let Some(output) = streaming {
                 output?
             } else {
@@ -4266,7 +4264,8 @@ fn sort_rows_by_output(
                 },
                 sqlparser::ast::Expr::Identifier(id) => columns
                     .iter()
-                    .position(|column| column.eq_ignore_ascii_case(&id.value)),
+                    .position(|column| column.eq_ignore_ascii_case(&id.value))
+                    .map(|index| index + 1),
                 _ => None,
             };
             let descending = order.options.sort == Some(sqlparser::ast::OrderBySort::Desc);
@@ -4329,15 +4328,36 @@ fn eval_set_expr(
         SetExpr::Select(select) => {
             let mut select = select.clone();
             desugar_select(&mut select, ds, source_dataset, named_caches)?;
-            let output = execute_select_core(
-                &select,
-                ds,
-                source_dataset,
-                named_caches,
-                needs_method_opcode,
-                None,
-                None,
-            )?;
+            // Set operands have no query-level order/limit of their own, but
+            // still benefit from reduced scans and incremental aggregation.
+            let query = sqlparser::ast::Query {
+                with: None,
+                body: Box::new(SetExpr::Select(select.clone())),
+                order_by: None,
+                limit_clause: None,
+                fetch: None,
+                locks: Vec::new(),
+                for_clause: None,
+                settings: None,
+                format_clause: None,
+                pipe_operators: Vec::new(),
+            };
+            let output = if let Some(result) =
+                streaming::execute(&query, &select, ds, named_caches, None)
+                    .or_else(|| relational::execute(&query, &select, ds, named_caches, None))
+            {
+                result?
+            } else {
+                execute_select_core(
+                    &select,
+                    ds,
+                    source_dataset,
+                    named_caches,
+                    needs_method_opcode,
+                    None,
+                    query_scan_columns(&select, &query),
+                )?
+            };
             Ok((
                 output.columns,
                 output.rows.into_iter().map(|row| row.values).collect(),
@@ -4386,20 +4406,36 @@ fn eval_set_expr(
                     }
                 }
                 SetOperator::Except => {
-                    let right_set: HashSet<Vec<String>> =
-                        right_rows.iter().map(|row| render_row_key(row)).collect();
+                    let right_set: HashSet<Vec<membership::Key>> = right_rows
+                        .iter()
+                        .map(|row| row.iter().map(|value| membership::set_key(value)).collect())
+                        .collect();
                     let kept = left_rows
                         .into_iter()
-                        .filter(|row| !right_set.contains(&render_row_key(row)))
+                        .filter(|row| {
+                            let key = row
+                                .iter()
+                                .map(|value| membership::set_key(value))
+                                .collect::<Vec<_>>();
+                            !right_set.contains(&key)
+                        })
                         .collect::<Vec<_>>();
                     dedup_and_sort(kept)
                 }
                 SetOperator::Intersect => {
-                    let right_set: HashSet<Vec<String>> =
-                        right_rows.iter().map(|row| render_row_key(row)).collect();
+                    let right_set: HashSet<Vec<membership::Key>> = right_rows
+                        .iter()
+                        .map(|row| row.iter().map(|value| membership::set_key(value)).collect())
+                        .collect();
                     let kept = left_rows
                         .into_iter()
-                        .filter(|row| right_set.contains(&render_row_key(row)))
+                        .filter(|row| {
+                            let key = row
+                                .iter()
+                                .map(|value| membership::set_key(value))
+                                .collect::<Vec<_>>();
+                            right_set.contains(&key)
+                        })
                         .collect::<Vec<_>>();
                     dedup_and_sort(kept)
                 }
@@ -4550,18 +4586,33 @@ fn desugar_select(
     source_dataset: Option<&Dataset>,
     named_caches: &NamedCaches,
 ) -> Result<(), String> {
+    let outer_aliases: HashSet<String> = select
+        .from
+        .iter()
+        .flat_map(|table| {
+            std::iter::once(&table.relation).chain(table.joins.iter().map(|join| &join.relation))
+        })
+        .map(|factor| match factor {
+            sqlparser::ast::TableFactor::Derived { alias, .. } => alias
+                .as_ref()
+                .map(|alias| alias.name.value.to_ascii_lowercase())
+                .unwrap_or_default(),
+            factor => factor_alias(factor).to_ascii_lowercase(),
+        })
+        .filter(|alias| !alias.is_empty())
+        .collect();
     for item in &mut select.projection {
         if let sqlparser::ast::SelectItem::UnnamedExpr(expr)
         | sqlparser::ast::SelectItem::ExprWithAlias { expr, .. } = item
         {
-            *expr = desugar_expr(expr, ds, source_dataset, named_caches)?;
+            *expr = desugar_expr(expr, ds, source_dataset, named_caches, &outer_aliases)?;
         }
     }
     if let Some(selection) = &mut select.selection {
-        *selection = desugar_expr(selection, ds, source_dataset, named_caches)?;
+        *selection = desugar_expr(selection, ds, source_dataset, named_caches, &outer_aliases)?;
     }
     if let Some(having) = &mut select.having {
-        *having = desugar_expr(having, ds, source_dataset, named_caches)?;
+        *having = desugar_expr(having, ds, source_dataset, named_caches, &outer_aliases)?;
     }
     Ok(())
 }
@@ -4571,6 +4622,7 @@ fn desugar_expr(
     ds: &Dataset,
     source_dataset: Option<&Dataset>,
     named_caches: &NamedCaches,
+    outer_aliases: &HashSet<String>,
 ) -> Result<sqlparser::ast::Expr, String> {
     use sqlparser::ast::Expr;
     match expr {
@@ -4586,8 +4638,13 @@ fn desugar_expr(
         Expr::Exists {
             subquery, negated, ..
         } => {
+            if let Some(expr) =
+                correlated::exists(subquery, *negated, outer_aliases, ds, named_caches)?
+            {
+                return Ok(expr);
+            }
             let (_, rows) =
-                execute_query_rows(subquery, ds, source_dataset, named_caches, None, false)?;
+                execute_query_rows(subquery, ds, source_dataset, named_caches, Some(1), false)?;
             let mut truth = !rows.is_empty();
             if *negated {
                 truth = !truth;
@@ -4613,19 +4670,38 @@ fn desugar_expr(
             })
         }
         Expr::BinaryOp { left, op, right } => Ok(Expr::BinaryOp {
-            left: Box::new(desugar_expr(left, ds, source_dataset, named_caches)?),
+            left: Box::new(desugar_expr(
+                left,
+                ds,
+                source_dataset,
+                named_caches,
+                outer_aliases,
+            )?),
             op: op.clone(),
-            right: Box::new(desugar_expr(right, ds, source_dataset, named_caches)?),
+            right: Box::new(desugar_expr(
+                right,
+                ds,
+                source_dataset,
+                named_caches,
+                outer_aliases,
+            )?),
         }),
         Expr::UnaryOp { op, expr } => Ok(Expr::UnaryOp {
             op: *op,
-            expr: Box::new(desugar_expr(expr, ds, source_dataset, named_caches)?),
+            expr: Box::new(desugar_expr(
+                expr,
+                ds,
+                source_dataset,
+                named_caches,
+                outer_aliases,
+            )?),
         }),
         Expr::Nested(expr) => Ok(Expr::Nested(Box::new(desugar_expr(
             expr,
             ds,
             source_dataset,
             named_caches,
+            outer_aliases,
         )?))),
         _ => Ok(expr.clone()),
     }
@@ -5104,6 +5180,7 @@ fn execute_select_core(
         vec![RelRow::default()]
     } else {
         let mut all = Vec::new();
+        let mut initialized = false;
         for table in &select.from {
             let relation_alias = factor_alias(&table.relation);
             let local = select
@@ -5144,8 +5221,9 @@ fn execute_select_core(
                 )?;
                 current = join_rows(&current, &right, constraint)?;
             }
-            if all.is_empty() {
+            if !initialized {
                 all = current;
+                initialized = true;
             } else {
                 let mut product = Vec::new();
                 let mut retained_bytes = 0;
@@ -5243,7 +5321,14 @@ fn execute_select_core(
 
     if select.distinct.is_some() {
         let mut seen = HashSet::new();
-        projected.retain(|row| seen.insert(row.values.clone()));
+        projected.retain(|row| {
+            seen.insert(
+                row.values
+                    .iter()
+                    .map(membership::set_key)
+                    .collect::<Vec<_>>(),
+            )
+        });
     }
     Ok(SelectOutput {
         columns,
@@ -5461,11 +5546,11 @@ fn group_rows(
             .collect());
     }
     charge_materialized(estimate_row_bytes(&rows))?;
-    let mut groups: HashMap<Vec<Scalar>, Vec<RelRow>> = HashMap::new();
+    let mut groups: HashMap<Vec<membership::Key>, Vec<RelRow>> = HashMap::new();
     for row in rows {
         let key = expressions
             .iter()
-            .map(|expr| eval_scalar(expr, &row, &[]))
+            .map(|expr| eval_scalar(expr, &row, &[]).map(|value| membership::set_key(&value)))
             .collect::<Result<Vec<_>, _>>()?;
         groups.entry(key).or_default().push(row);
     }
@@ -5813,27 +5898,52 @@ fn join_rows(
         }
         return Ok(merged);
     };
-    let sqlparser::ast::Expr::BinaryOp {
-        left: join_left,
-        op: sqlparser::ast::BinaryOperator::Eq,
-        right: join_right,
-    } = constraint
-    else {
+    let mut conjuncts = Vec::new();
+    flatten_and(constraint, &mut conjuncts);
+    let mut keys = Vec::new();
+    for expr in conjuncts {
+        let sqlparser::ast::Expr::BinaryOp {
+            left: a,
+            op: sqlparser::ast::BinaryOperator::Eq,
+            right: b,
+        } = expr
+        else {
+            continue;
+        };
+        if let (Some(left), Some(right)) = (left.first(), right.first()) {
+            if eval_scalar(a, left, &[]).is_ok() && eval_scalar(b, right, &[]).is_ok() {
+                keys.push((a.as_ref(), b.as_ref()));
+            } else if eval_scalar(b, left, &[]).is_ok() && eval_scalar(a, right, &[]).is_ok() {
+                keys.push((b.as_ref(), a.as_ref()));
+            }
+        }
+    }
+    if left.is_empty() || right.is_empty() {
+        return Ok(Vec::new());
+    }
+    if keys.is_empty() {
         return Err("unsupported SQL: JOIN requires an equality ON condition".into());
+    }
+    let make_key = |row: &RelRow, right: bool| -> Result<Option<Vec<membership::Key>>, String> {
+        keys.iter()
+            .map(|(a, b)| {
+                eval_scalar(if right { b } else { a }, row, &[])
+                    .map(|value| membership::key(&value))
+            })
+            .collect::<Result<Option<Vec<_>>, _>>()
     };
-    // Build the hash table from the right side. This covers the DexSQL
-    // method ↔ reference joins and avoids materializing a quadratic product.
-    let mut index: HashMap<Scalar, Vec<&RelRow>> = HashMap::new();
+    let mut index: FxHashMap<Vec<membership::Key>, Vec<&RelRow>> = FxHashMap::default();
     for row in right {
-        let key =
-            eval_scalar(join_right, row, &[]).or_else(|_| eval_scalar(join_left, row, &[]))?;
-        index.entry(key).or_default().push(row);
+        if let Some(key) = make_key(row, true)? {
+            index.entry(key).or_default().push(row);
+        }
     }
     let mut joined = Vec::new();
     let mut retained_bytes = 0;
     for left_row in left {
-        let key = eval_scalar(join_left, left_row, &[])
-            .or_else(|_| eval_scalar(join_right, left_row, &[]))?;
+        let Some(key) = make_key(left_row, false)? else {
+            continue;
+        };
         if let Some(matches) = index.get(&key) {
             for right_row in matches {
                 let merged = left_row.merge(right_row);
@@ -5873,6 +5983,15 @@ fn derive_join_keys(
         } else {
             return Ok(None);
         };
+    // Generic metadata scanners only implement descriptor-key filtering.
+    // Other keys must reach the join evaluator, rather than being tested
+    // against an unsupported-column NULL and discarding every row.
+    if !matches!(
+        key_column.as_str(),
+        "descriptor" | "method" | "class_descriptor"
+    ) {
+        return Ok(None);
+    }
     let _ = right_expr;
     let mut values = HashSet::new();
     for row in current {
@@ -6141,7 +6260,10 @@ fn scan_cached_table(
             row.put(alias, column, value.clone());
         }
         if let Some((column, accepted)) = key_filter {
-            if !accepted.contains(row.get(column).unwrap_or(&Scalar::Null)) {
+            if !accepted
+                .iter()
+                .any(|key| key.sql_eq(row.get(column).unwrap_or(&Scalar::Null)))
+            {
                 continue;
             }
         }
@@ -6178,9 +6300,17 @@ fn scan_factor(
         if *lateral {
             return Err("LATERAL derived tables are not supported".into());
         }
-        let result = execute_query(subquery, ds, source_dataset, named_caches, None, false)?;
+        let (columns, rows) =
+            execute_query_rows(subquery, ds, source_dataset, named_caches, None, false)?;
         let alias_name = alias.as_ref().map(|a| a.name.value.as_str()).unwrap_or("");
-        let table = Arc::new(CachedTable::from_result(result));
+        let (columns, rows) = rename_result_columns(
+            (columns, rows),
+            alias
+                .as_ref()
+                .map(|alias| alias.columns.as_slice())
+                .unwrap_or(&[]),
+        );
+        let table = Arc::new(CachedTable { columns, rows });
         return Ok(scan_cached_table(
             &table, alias_name, predicates, key_filter,
         ));
@@ -9740,24 +9870,25 @@ fn like_match_fast(value: &str, pattern: &str, escape: Option<char>) -> bool {
 }
 
 fn compare_scalar(a: &Scalar, b: &Scalar) -> std::cmp::Ordering {
-    match (a, b) {
-        (Scalar::Null, Scalar::Null) => return std::cmp::Ordering::Equal,
-        (Scalar::Null, _) => return std::cmp::Ordering::Less,
-        (_, Scalar::Null) => return std::cmp::Ordering::Greater,
-        _ => {}
+    if let Some(order) = membership::numeric_cmp(a, b) {
+        return order;
     }
-    if let (Some(x), Some(y)) = (a.numeric(), b.numeric()) {
-        if x.is_nan() || y.is_nan() {
-            return match (x.is_nan(), y.is_nan()) {
-                (true, true) => std::cmp::Ordering::Equal,
-                (true, false) => std::cmp::Ordering::Less,
-                (false, true) => std::cmp::Ordering::Greater,
-                _ => std::cmp::Ordering::Equal,
-            };
-        }
-        return x.partial_cmp(&y).unwrap_or(std::cmp::Ordering::Equal);
+    let rank = |value: &Scalar| match value {
+        Scalar::Null => 0,
+        Scalar::Int(_) | Scalar::Real(_) => 1,
+        Scalar::Text(_) => 2,
+        Scalar::Blob(_) => 3,
+    };
+    match rank(a).cmp(&rank(b)) {
+        std::cmp::Ordering::Equal => match (a, b) {
+            (Scalar::Null, Scalar::Null) => std::cmp::Ordering::Equal,
+            (Scalar::Text(a), Scalar::Text(b)) => dexsql_cache::utf16_cmp(a, b),
+            (Scalar::Blob(a), Scalar::Blob(b)) => a.cmp(b),
+            (Scalar::Real(a), Scalar::Real(b)) => a.cmp(b),
+            _ => std::cmp::Ordering::Equal,
+        },
+        order => order,
     }
-    a.display().cmp(&b.display())
 }
 fn eval_binary(op: &sqlparser::ast::BinaryOperator, a: &Scalar, b: &Scalar) -> bool {
     use sqlparser::ast::BinaryOperator::*;
@@ -9861,7 +9992,7 @@ fn eval_scalar(
             match op {
                 UnaryOperator::Plus => Ok(x),
                 UnaryOperator::Minus => match x {
-                    Scalar::Int(v) => Ok(Scalar::Int(-v)),
+                    Scalar::Int(v) => Ok(Scalar::Int(v.wrapping_neg())),
                     Scalar::Real(v) => v
                         .parse::<f64>()
                         .map(|n| scalar_functions::real_scalar(-n))
@@ -9869,7 +10000,11 @@ fn eval_scalar(
                     Scalar::Null => Ok(Scalar::Null),
                     _ => Err("unary minus requires a number".into()),
                 },
-                UnaryOperator::Not => Ok(Scalar::Int((!x.truthy()) as i64)),
+                UnaryOperator::Not => Ok(if matches!(x, Scalar::Null) {
+                    Scalar::Null
+                } else {
+                    Scalar::Int((!x.truthy()) as i64)
+                }),
                 _ => Err(format!("unsupported unary operator {op}")),
             }
         }
@@ -10024,19 +10159,18 @@ fn eval_scalar(
                 let item = eval_scalar(item, row, group)?;
                 if matches!(item, Scalar::Null) {
                     saw_null = true;
-                } else if value.sql_eq(&item) {
+                } else if !matches!(value, Scalar::Null) && value.sql_eq(&item) {
                     found = true;
                     break;
                 }
             }
-            if matches!(value, Scalar::Null) {
-                return Ok(Scalar::Null);
-            }
-            Ok(match (found, saw_null) {
-                (true, _) => Scalar::Int(if *negated { 0 } else { 1 }),
-                (false, true) => Scalar::Null,
-                (false, false) => Scalar::Int(if *negated { 1 } else { 0 }),
-            })
+            Ok(membership::result(
+                found,
+                saw_null,
+                list.is_empty(),
+                &value,
+                *negated,
+            ))
         }
         Expr::Between {
             expr,
@@ -10078,6 +10212,9 @@ fn eval_scalar(
             scalar_functions::eval_scalar_function("trim", &values).unwrap_or(Ok(Scalar::Null))
         }
         Expr::Function(f) => {
+            if let Some(value) = membership::evaluate(f, row, group) {
+                return value;
+            }
             let name = f
                 .name
                 .0
@@ -10382,20 +10519,12 @@ fn eval_bool(expr: &sqlparser::ast::Expr, row: &RelRow, group: &[RelRow]) -> Res
         Expr::UnaryOp {
             op: sqlparser::ast::UnaryOperator::Not,
             expr,
-        } => Ok(!eval_bool(expr, row, group)?),
-        Expr::Nested(e) => eval_bool(e, row, group),
-        Expr::InList {
-            expr,
-            list,
-            negated,
         } => {
-            let v = eval_scalar(expr, row, group)?;
-            let found = list
-                .iter()
-                .filter_map(|x| eval_scalar(x, row, group).ok())
-                .any(|x| !matches!(x, Scalar::Null) && v.sql_eq(&x));
-            Ok(if *negated { !found } else { found })
+            let value = eval_scalar(expr, row, group)?;
+            Ok(!matches!(value, Scalar::Null) && !value.truthy())
         }
+        Expr::Nested(e) => eval_bool(e, row, group),
+        Expr::InList { .. } => Ok(eval_scalar(expr, row, group)?.truthy()),
         Expr::Like {
             expr,
             pattern,

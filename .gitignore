@@ -6,5 +6,6 @@ __pycache__/
 fixtures/
 tools/
 artifacts/
+docs/
 
 /.claude/

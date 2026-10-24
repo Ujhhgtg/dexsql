@@ -23,7 +23,7 @@ enum Accumulator {
 }
 struct State {
     accumulator: Accumulator,
-    seen: Option<Box<HashSet<Scalar>>>,
+    seen: Option<Box<HashSet<membership::Key>>>,
 }
 impl State {
     fn extra_bytes(&self) -> u64 {
@@ -63,17 +63,7 @@ impl State {
             return Ok(());
         }
         if let Some(seen) = self.seen.as_mut() {
-            let key = match value.numeric() {
-                Some(number)
-                    if number >= i64::MIN as f64
-                        && number < i64::MAX as f64
-                        && number.fract() == 0.0 =>
-                {
-                    Scalar::Int(number as i64)
-                }
-                Some(number) => scalar_functions::real_scalar(number),
-                None => value.clone(),
-            };
+            let key = membership::set_key(&value);
             if !seen.insert(key) {
                 return Ok(());
             }
@@ -143,7 +133,7 @@ impl State {
 
 // Visit the expression forms evaluated by the scalar executor. Unknown AST
 // forms fall back to generic execution before any source rows are consumed.
-fn walk(expr: &mut Expr, f: &mut impl FnMut(&mut Expr) -> Option<bool>) -> Option<()> {
+pub(super) fn walk(expr: &mut Expr, f: &mut impl FnMut(&mut Expr) -> Option<bool>) -> Option<()> {
     if f(expr)? {
         return Some(());
     }
@@ -258,10 +248,16 @@ fn rewrite(
                 needed.insert(id.value.to_ascii_lowercase());
             }
             Expr::CompoundIdentifier(ids) => {
-                if ids.len() != 2 || !ids[0].value.eq_ignore_ascii_case(alias) {
+                if ids.len() != 2
+                    || (!alias.is_empty() && !ids[0].value.eq_ignore_ascii_case(alias))
+                {
                     return None;
                 }
-                needed.insert(ids[1].value.to_ascii_lowercase());
+                needed.insert(if alias.is_empty() {
+                    format!("{}.{}", ids[0].value, ids[1].value).to_ascii_lowercase()
+                } else {
+                    ids[1].value.to_ascii_lowercase()
+                });
             }
             Expr::Function(function) => {
                 let name = function.name.0.last()?.to_string().to_ascii_lowercase();
@@ -338,6 +334,32 @@ struct Group {
     states: Vec<State>,
 }
 
+pub(super) fn supports_table(table: &str) -> bool {
+    matches!(
+        table,
+        "methods"
+            | "classes"
+            | "fields"
+            | "method_strings"
+            | "method_calls"
+            | "method_field_accesses"
+            | "method_used_types"
+            | "method_numbers"
+            | "method_using_numbers"
+            | "dex_files"
+            | "strings"
+            | "type_ids"
+            | "types"
+            | "type_lists"
+            | "type_list_entries"
+            | "proto_ids"
+            | "protos"
+            | "proto_params"
+            | "field_ids"
+            | "method_ids"
+    )
+}
+
 pub(super) fn execute(
     query: &sqlparser::ast::Query,
     select: &Select,
@@ -345,9 +367,93 @@ pub(super) fn execute(
     caches: &NamedCaches,
     cli_limit: Option<u64>,
 ) -> Option<Result<SelectOutput, String>> {
-    if select.from.len() != 1
-        || !select.from[0].joins.is_empty()
-        || select.prewhere.is_some()
+    if select.from.len() != 1 || !select.from[0].joins.is_empty() {
+        return None;
+    }
+    let sqlparser::ast::TableFactor::Table {
+        name, alias, args, ..
+    } = &select.from[0].relation
+    else {
+        return None;
+    };
+    if args.is_some() || name.0.len() != 1 {
+        return None;
+    }
+    let table = name.0.last()?.as_ident()?.value.to_ascii_lowercase();
+    if caches.has_definition(&table)
+        || caches.tables.borrow().contains_key(&table)
+        || !supports_table(&table)
+    {
+        return None;
+    }
+    let schema = dexsql_schema::TABLES
+        .iter()
+        .find(|schema| schema.name == table)?
+        .columns
+        .iter()
+        .map(|column| column.name.to_owned())
+        .collect::<Vec<_>>();
+    let alias = alias
+        .as_ref()
+        .map(|alias| alias.name.value.as_str())
+        .unwrap_or(&table);
+    let scan_predicates = select
+        .selection
+        .as_ref()
+        .and_then(|expr| push_predicates(expr, alias))
+        .map(|predicates| {
+            predicates
+                .into_iter()
+                .filter(|predicate| {
+                    !matches!(predicate.kind, PushPredicateKind::In)
+                        || predicate.values.len() < membership::HASH_THRESHOLD
+                })
+                .collect::<Vec<_>>()
+        });
+    execute_with_input(
+        query,
+        select,
+        &schema,
+        alias,
+        cli_limit,
+        |columns, visit| {
+            let columns = columns.iter().map(String::as_str).collect::<Vec<_>>();
+            visit_source(
+                ds,
+                &table,
+                alias,
+                &columns,
+                scan_predicates.as_deref(),
+                visit,
+            )
+        },
+    )
+}
+
+/// Execute the common projection/grouping/order sink over a caller-owned row
+/// stream. Qualified schema entries are full `alias.column` lookup keys.
+pub(super) fn execute_input(
+    query: &sqlparser::ast::Query,
+    select: &Select,
+    schema: &[String],
+    cli_limit: Option<u64>,
+    visit: impl FnOnce(&[String], &mut dyn FnMut(&RelRow) -> Result<bool, String>) -> Result<(), String>,
+) -> Option<Result<SelectOutput, String>> {
+    execute_with_input(query, select, schema, "", cli_limit, visit)
+}
+
+fn execute_with_input(
+    query: &sqlparser::ast::Query,
+    select: &Select,
+    schema: &[String],
+    alias: &str,
+    cli_limit: Option<u64>,
+    visit_input: impl FnOnce(
+        &[String],
+        &mut dyn FnMut(&RelRow) -> Result<bool, String>,
+    ) -> Result<(), String>,
+) -> Option<Result<SelectOutput, String>> {
+    if select.prewhere.is_some()
         || !select.lateral_views.is_empty()
         || !select.connect_by.is_empty()
         || !select.cluster_by.is_empty()
@@ -363,40 +469,6 @@ pub(super) fn execute(
     {
         return None;
     }
-    let sqlparser::ast::TableFactor::Table {
-        name, alias, args, ..
-    } = &select.from[0].relation
-    else {
-        return None;
-    };
-    if args.is_some() || name.0.len() != 1 {
-        return None;
-    }
-    let table = name.0.last()?.as_ident()?.value.to_ascii_lowercase();
-    if caches.has_definition(&table) || caches.tables.borrow().contains_key(&table) {
-        return None;
-    }
-    if !matches!(
-        table.as_str(),
-        "methods"
-            | "classes"
-            | "fields"
-            | "method_strings"
-            | "method_calls"
-            | "method_field_accesses"
-            | "method_used_types"
-            | "method_numbers"
-            | "method_using_numbers"
-    ) {
-        return None;
-    }
-    let schema = dexsql_schema::TABLES
-        .iter()
-        .find(|schema| schema.name == table)?;
-    let alias = alias
-        .as_ref()
-        .map(|alias| alias.name.value.as_str())
-        .unwrap_or(&table);
     let mut projection = Vec::new();
     for item in &select.projection {
         match item {
@@ -406,22 +478,27 @@ pub(super) fn execute(
             SelectItem::ExprWithAlias { expr, alias } => {
                 projection.push((expr.clone(), alias.value.clone()))
             }
-            SelectItem::Wildcard(options) if *options == Default::default() => {
-                for column in schema.columns {
+            SelectItem::Wildcard(options)
+                if !alias.is_empty() && *options == Default::default() =>
+            {
+                for column in schema {
                     projection.push((
-                        Expr::Identifier(sqlparser::ast::Ident::new(column.name)),
-                        column.name.to_owned(),
+                        Expr::Identifier(sqlparser::ast::Ident::new(column)),
+                        column.clone(),
                     ));
                 }
             }
             SelectItem::QualifiedWildcard(
                 sqlparser::ast::SelectItemQualifiedWildcardKind::ObjectName(name),
                 options,
-            ) if *options == Default::default() && name.to_string().eq_ignore_ascii_case(alias) => {
-                for column in schema.columns {
+            ) if !alias.is_empty()
+                && *options == Default::default()
+                && name.to_string().eq_ignore_ascii_case(alias) =>
+            {
+                for column in schema {
                     projection.push((
-                        Expr::Identifier(sqlparser::ast::Ident::new(column.name)),
-                        column.name.to_owned(),
+                        Expr::Identifier(sqlparser::ast::Ident::new(column)),
+                        column.clone(),
                     ));
                 }
             }
@@ -466,21 +543,34 @@ pub(super) fn execute(
     }));
     if needed
         .iter()
-        .any(|name| !schema.columns.iter().any(|column| column.name == name))
+        .any(|name| !schema.iter().any(|column| column == name))
     {
         return None;
     }
-    let scan_predicates = select
-        .selection
-        .as_ref()
-        .and_then(|expr| push_predicates(expr, alias));
+    let membership_scope = membership::Scope::new();
+    for expr in selection
+        .iter_mut()
+        .chain(group_exprs.iter_mut())
+        .chain(projection.iter_mut().map(|(expr, _)| expr))
+        .chain(having.iter_mut())
+        .chain(orders.iter_mut())
+        .chain(
+            specs
+                .iter_mut()
+                .flat_map(|spec| spec.argument.iter_mut().chain(spec.separator.iter_mut())),
+        )
+    {
+        walk(expr, &mut |expr| {
+            membership_scope.compile(expr);
+            Some(false)
+        })?;
+    }
     let grouped = !specs.is_empty() || !group_exprs.is_empty();
-    let requested: Vec<&str> = schema
-        .columns
+    let requested = schema
         .iter()
-        .map(|column| column.name)
         .filter(|name| needed.contains(*name))
-        .collect();
+        .cloned()
+        .collect::<Vec<_>>();
     let columns = projection
         .iter()
         .map(|(_, label)| label.clone())
@@ -525,7 +615,7 @@ pub(super) fn execute(
     Some((|| {
         let mut output = Vec::new();
         let mut seen = HashSet::new();
-        let mut groups: HashMap<Vec<Scalar>, Group> = HashMap::new();
+        let mut groups: HashMap<Vec<membership::Key>, Group> = HashMap::new();
         let mut aggregate_payload_bytes = 0u64;
         if grouped && group_exprs.is_empty() {
             groups.insert(
@@ -541,7 +631,9 @@ pub(super) fn execute(
                 .iter()
                 .map(|(expr, _)| eval_scalar(expr, row, &[]))
                 .collect::<Result<Vec<_>, _>>()?;
-            if select.distinct.is_some() && !seen.insert(values.clone()) {
+            if select.distinct.is_some()
+                && !seen.insert(values.iter().map(membership::set_key).collect::<Vec<_>>())
+            {
                 return Ok(());
             }
             let mut context = if orders.is_empty() && having.is_none() {
@@ -614,58 +706,57 @@ pub(super) fn execute(
             Ok(())
         };
         if bound != Some(0) {
-            visit_source(
-                ds,
-                &table,
-                alias,
-                &requested,
-                scan_predicates.as_deref(),
-                |row| {
-                    if selection
-                        .as_ref()
-                        .is_some_and(|expr| !eval_bool(expr, row, &[]).unwrap_or(false))
-                    {
-                        return Ok(false);
-                    }
-                    if grouped {
-                        let key = group_exprs
+            visit_input(&requested, &mut |row| {
+                if selection
+                    .as_ref()
+                    .is_some_and(|expr| !eval_bool(expr, row, &[]).unwrap_or(false))
+                {
+                    return Ok(false);
+                }
+                if grouped {
+                    let key = group_exprs
+                        .iter()
+                        .map(|expr| {
+                            eval_scalar(expr, row, &[]).map(|value| membership::set_key(&value))
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let group = groups.entry(key).or_insert_with(|| Group {
+                        values: requested
                             .iter()
-                            .map(|expr| eval_scalar(expr, row, &[]))
-                            .collect::<Result<Vec<_>, _>>()?;
-                        let group = groups.entry(key).or_insert_with(|| Group {
-                            values: requested
-                                .iter()
-                                .map(|column| row.get(column).cloned().unwrap_or(Scalar::Null))
-                                .collect(),
-                            states: specs.iter().map(State::new).collect(),
-                        });
-                        if group.values.is_empty() {
-                            group.values = requested
-                                .iter()
-                                .map(|column| row.get(column).cloned().unwrap_or(Scalar::Null))
-                                .collect();
-                        }
-                        for (state, spec) in group.states.iter_mut().zip(&specs) {
-                            let before = state.extra_bytes();
-                            state.update(spec, row)?;
-                            aggregate_payload_bytes += state.extra_bytes().saturating_sub(before);
-                        }
-                        charge_materialized(
-                            aggregate_payload_bytes
-                                + groups.len() as u64
-                                    * ((requested.len() + specs.len()).max(1) as u64 * 32),
-                        )?;
-                    } else {
-                        emit(row, &mut output)?;
+                            .map(|column| row.get(column).cloned().unwrap_or(Scalar::Null))
+                            .collect(),
+                        states: specs.iter().map(State::new).collect(),
+                    });
+                    if group.values.is_empty() {
+                        group.values = requested
+                            .iter()
+                            .map(|column| row.get(column).cloned().unwrap_or(Scalar::Null))
+                            .collect();
                     }
-                    Ok(bound.is_some_and(|bound| output.len() >= bound))
-                },
-            )?;
+                    for (state, spec) in group.states.iter_mut().zip(&specs) {
+                        let before = state.extra_bytes();
+                        state.update(spec, row)?;
+                        aggregate_payload_bytes += state.extra_bytes().saturating_sub(before);
+                    }
+                    charge_materialized(
+                        aggregate_payload_bytes
+                            + groups.len() as u64
+                                * ((requested.len() + specs.len()).max(1) as u64 * 32),
+                    )?;
+                } else {
+                    emit(row, &mut output)?;
+                }
+                Ok(bound.is_some_and(|bound| output.len() >= bound))
+            })?;
         }
         for (_, group) in groups {
             let mut row = RelRow::with_capacity(requested.len());
             for (column, value) in requested.iter().zip(group.values) {
-                row.put(alias, column, value);
+                if alias.is_empty() {
+                    row.values.insert(intern_rel_component(column), value);
+                } else {
+                    row.put(alias, column, value);
+                }
             }
             for (state, spec) in group.states.iter().zip(&specs) {
                 row.values
@@ -681,7 +772,25 @@ pub(super) fn execute(
 }
 
 #[derive(Clone, Copy)]
-enum Source<'a> {
+pub(super) enum Source<'a> {
+    File,
+    PoolString(u32),
+    PoolType(u32),
+    PoolProto(u32),
+    ProtoParam {
+        proto_idx: u32,
+        ordinal: usize,
+        type_idx: u16,
+    },
+    TypeList {
+        off: usize,
+        end: usize,
+    },
+    TypeListEntry {
+        off: usize,
+        ordinal: usize,
+        type_idx: u16,
+    },
     Method(u32),
     Class(&'a ClassInfo),
     Field(u32),
@@ -692,7 +801,7 @@ enum Source<'a> {
     Number(&'a dexsql_cache::MethodNumberRef),
 }
 
-struct Cells<'a> {
+pub(super) struct Cells<'a> {
     file: &'a DexFile,
     strings: Vec<Option<Arc<str>>>,
     methods: Vec<Option<Arc<str>>>,
@@ -700,7 +809,12 @@ struct Cells<'a> {
     definitions: Vec<Option<(u32, bool)>>,
 }
 impl<'a> Cells<'a> {
-    fn new(file: &'a DexFile, needs_definitions: bool, columns: &[&str]) -> Self {
+    pub(super) fn new(
+        file: &'a DexFile,
+        table: &str,
+        needs_definitions: bool,
+        columns: &[&str],
+    ) -> Self {
         let mut definitions = if needs_definitions {
             vec![None; file.methods.len()]
         } else {
@@ -715,30 +829,50 @@ impl<'a> Cells<'a> {
                 }
             }
         }
-        let needs_strings = columns.iter().any(|column| {
-            matches!(
-                *column,
-                "value"
-                    | "name"
-                    | "method_name"
-                    | "method_class"
-                    | "class_descriptor"
-                    | "descriptor"
-                    | "return_descriptor"
-                    | "superclass_descriptor"
-                    | "source_file"
-                    | "type_descriptor"
-                    | "callee_class"
-                    | "callee_name"
-                    | "field_class"
-                    | "field_name"
-                    | "field_type"
-            )
-        });
-        let needs_methods = columns
-            .iter()
-            .any(|column| matches!(*column, "method" | "descriptor" | "callee"));
-        let needs_fields = columns.contains(&"field") || columns.contains(&"descriptor");
+        // Pool rows visit each id once, so retaining every decoded value only
+        // duplicates the source pool. Reference rows benefit from memoization.
+        let memoize_strings = matches!(
+            table,
+            "methods"
+                | "classes"
+                | "fields"
+                | "method_strings"
+                | "method_calls"
+                | "method_field_accesses"
+                | "method_used_types"
+                | "method_numbers"
+                | "method_using_numbers"
+        );
+        let needs_strings = memoize_strings
+            && columns.iter().any(|column| {
+                matches!(
+                    *column,
+                    "value"
+                        | "name"
+                        | "method_name"
+                        | "method_class"
+                        | "class_descriptor"
+                        | "return_descriptor"
+                        | "superclass_descriptor"
+                        | "source_file"
+                        | "type_descriptor"
+                        | "callee_class"
+                        | "callee_name"
+                        | "field_class"
+                        | "field_name"
+                        | "field_type"
+                ) || (*column == "descriptor" && table == "classes")
+            });
+        let needs_methods = match table {
+            "methods" => false,
+            "method_calls" => columns.contains(&"method") || columns.contains(&"callee"),
+            "classes" | "fields" => false,
+            _ => columns.contains(&"method"),
+        };
+        let needs_fields = match table {
+            "method_field_accesses" => columns.contains(&"field"),
+            _ => false,
+        };
         Self {
             file,
             strings: if needs_strings {
@@ -761,7 +895,7 @@ impl<'a> Cells<'a> {
     }
     fn string(&mut self, index: u32) -> Scalar {
         let Some(slot) = self.strings.get_mut(index as usize) else {
-            return Scalar::text("");
+            return Scalar::text(self.file.string(index));
         };
         Scalar::Text(
             slot.get_or_insert_with(|| Arc::from(self.file.string(index)))
@@ -778,7 +912,7 @@ impl<'a> Cells<'a> {
     }
     fn method(&mut self, index: u32) -> Scalar {
         let Some(slot) = self.methods.get_mut(index as usize) else {
-            return Scalar::text("");
+            return Scalar::text(self.file.method_descriptor_direct(index));
         };
         Scalar::Text(
             slot.get_or_insert_with(|| Arc::from(self.file.method_descriptor_direct(index)))
@@ -787,14 +921,14 @@ impl<'a> Cells<'a> {
     }
     fn field(&mut self, index: u32) -> Scalar {
         let Some(slot) = self.fields.get_mut(index as usize) else {
-            return Scalar::text("");
+            return Scalar::text(self.file.field_descriptor_direct(index));
         };
         Scalar::Text(
             slot.get_or_insert_with(|| Arc::from(self.file.field_descriptor_direct(index)))
                 .clone(),
         )
     }
-    fn value(
+    pub(super) fn value(
         &mut self,
         source: Source<'_>,
         column: &str,
@@ -809,8 +943,123 @@ impl<'a> Cells<'a> {
             Source::Number(row) => row.method_idx,
             _ => u32::MAX,
         };
-        if column == "file_id" {
+        if matches!(column, "file_id" | "string_pool_id") {
             return Scalar::Int(self.file.file_id as i64);
+        }
+        match source {
+            Source::File => {
+                return match column {
+                    "source_path" => {
+                        Scalar::text(self.file.source_path.to_string_lossy().into_owned())
+                    }
+                    "entry_name" => Scalar::text(&self.file.entry_name),
+                    "byte_len" | "file_size" => Scalar::Int(self.file.byte_len as i64),
+                    "dex_version" => Scalar::text(&self.file.dex_version),
+                    "checksum" => Scalar::Int(self.file.checksum as i64),
+                    "signature_hex" => Scalar::text(&self.file.signature_hex),
+                    "header_size" => Scalar::Int(self.file.header_size as i64),
+                    "endian_tag" => Scalar::Int(self.file.endian_tag as i64),
+                    "link_size" => Scalar::Int(read_u32_at(self.file.raw(), 44) as i64),
+                    "link_off" => Scalar::Int(read_u32_at(self.file.raw(), 48) as i64),
+                    "map_off" => Scalar::Int(self.file.map_off as i64),
+                    "string_count" => Scalar::Int(self.file.strings.len() as i64),
+                    "string_ids_off" => Scalar::Int(self.file.string_ids_off as i64),
+                    "type_count" => Scalar::Int(self.file.types.len() as i64),
+                    "type_ids_off" => Scalar::Int(self.file.type_ids_off as i64),
+                    "proto_count" => Scalar::Int(self.file.protos.len() as i64),
+                    "proto_ids_off" => Scalar::Int(self.file.proto_ids_off as i64),
+                    "field_count" => Scalar::Int(self.file.fields.len() as i64),
+                    "field_ids_off" => Scalar::Int(self.file.field_ids_off as i64),
+                    "method_count" => Scalar::Int(self.file.methods.len() as i64),
+                    "method_ids_off" => Scalar::Int(self.file.method_ids_off as i64),
+                    "class_count" => Scalar::Int(self.file.classes.len() as i64),
+                    "class_defs_off" => Scalar::Int(self.file.class_defs_off as i64),
+                    "data_size" => Scalar::Int(self.file.data_size as i64),
+                    "data_off" => Scalar::Int(self.file.data_off as i64),
+                    _ => Scalar::Null,
+                };
+            }
+            Source::PoolString(index) => {
+                return match column {
+                    "string_idx" => Scalar::Int(index as i64),
+                    "value" => self.string(index),
+                    _ => Scalar::Null,
+                };
+            }
+            Source::PoolType(index) => {
+                return match column {
+                    "type_idx" => Scalar::Int(index as i64),
+                    "descriptor_idx" => self
+                        .file
+                        .types
+                        .get(index as usize)
+                        .map(|typ| Scalar::Int(typ.descriptor_idx as i64))
+                        .unwrap_or(Scalar::Null),
+                    "descriptor" => self.typ(index),
+                    "java_name" => Scalar::text(java_name(self.file.type_descriptor(index))),
+                    _ => Scalar::Null,
+                };
+            }
+            Source::PoolProto(index) => {
+                let Some(proto) = self.file.protos.get(index as usize) else {
+                    return Scalar::Null;
+                };
+                return match column {
+                    "proto_idx" => Scalar::Int(index as i64),
+                    "shorty_idx" => Scalar::Int(proto.shorty_idx as i64),
+                    "shorty" => self.string(proto.shorty_idx),
+                    "return_type_idx" => Scalar::Int(proto.return_type_idx as i64),
+                    "return_descriptor" => self.typ(proto.return_type_idx),
+                    "parameters_off" => Scalar::Int(read_u32_at(
+                        self.file.raw(),
+                        self.file.proto_ids_off as usize + index as usize * 12 + 8,
+                    ) as i64),
+                    "param_count" => Scalar::Int(proto.parameters.len() as i64),
+                    "param_descriptors" => Scalar::text(
+                        proto
+                            .parameters
+                            .iter()
+                            .map(|index| self.file.type_descriptor(*index as u32))
+                            .collect::<Vec<_>>()
+                            .join(","),
+                    ),
+                    _ => Scalar::Null,
+                };
+            }
+            Source::ProtoParam {
+                proto_idx,
+                ordinal,
+                type_idx,
+            } => {
+                return match column {
+                    "proto_idx" => Scalar::Int(proto_idx as i64),
+                    "ordinal" => Scalar::Int(ordinal as i64),
+                    "type_idx" => Scalar::Int(type_idx as i64),
+                    "descriptor" => self.typ(type_idx as u32),
+                    _ => Scalar::Null,
+                };
+            }
+            Source::TypeList { off, end } => {
+                return match column {
+                    "type_list_off" => Scalar::Int(off as i64),
+                    "type_list_end_off" => Scalar::Int(end as i64),
+                    "size" => Scalar::Int(read_u32_at(self.file.raw(), off) as i64),
+                    _ => Scalar::Null,
+                };
+            }
+            Source::TypeListEntry {
+                off,
+                ordinal,
+                type_idx,
+            } => {
+                return match column {
+                    "type_list_off" => Scalar::Int(off as i64),
+                    "ordinal" => Scalar::Int(ordinal as i64),
+                    "type_idx" => Scalar::Int(type_idx as i64),
+                    _ => Scalar::Null,
+                };
+            }
+            _ => {}
         }
         if let Source::Class(class) = source {
             return match column {
@@ -843,6 +1092,7 @@ impl<'a> Cells<'a> {
                 "type_idx" => Scalar::Int(field.type_idx as i64),
                 "type_descriptor" => self.typ(field.type_idx as u32),
                 "name" => self.string(field.name_idx),
+                "name_idx" => Scalar::Int(field.name_idx as i64),
                 "descriptor" => self.field(index),
                 _ => Scalar::Null,
             };
@@ -851,20 +1101,25 @@ impl<'a> Cells<'a> {
         match column {
             "method_idx" => return Scalar::Int(method_idx as i64),
             "class_idx" => {
-                return Scalar::Int(method.map(|method| method.class_idx).unwrap_or(0) as i64)
+                return Scalar::Int(method.map(|method| method.class_idx).unwrap_or(0) as i64);
             }
             "method" | "descriptor" => return self.method(method_idx),
             "method_class" | "class_descriptor" => {
                 return method
                     .map(|method| method.class_idx as u32)
                     .map(|index| self.typ(index))
-                    .unwrap_or_else(|| Scalar::text(""))
+                    .unwrap_or_else(|| Scalar::text(""));
+            }
+            "name_idx" => {
+                return method
+                    .map(|method| Scalar::Int(method.name_idx as i64))
+                    .unwrap_or(Scalar::Null);
             }
             "method_name" | "name" => {
                 return method
                     .map(|method| method.name_idx)
                     .map(|index| self.string(index))
-                    .unwrap_or_else(|| Scalar::text(""))
+                    .unwrap_or_else(|| Scalar::text(""));
             }
             _ => {}
         }
@@ -986,13 +1241,28 @@ impl<'a> Cells<'a> {
     }
 }
 
-fn visit_source(
+pub(super) fn visit_source(
     ds: &Dataset,
     table: &str,
     alias: &str,
     columns: &[&str],
     predicates: Option<&[PushPredicate]>,
     mut visit: impl FnMut(&RelRow) -> Result<bool, String>,
+) -> Result<(), String> {
+    visit_source_records(ds, table, alias, columns, predicates, |row, _, _| {
+        visit(row)
+    })
+}
+
+/// Expose the borrowed cache record alongside its reduced row. Join build
+/// sides retain this record identity, then decode output cells only on match.
+pub(super) fn visit_source_records<'a>(
+    ds: &'a Dataset,
+    table: &str,
+    alias: &str,
+    columns: &[&str],
+    predicates: Option<&[PushPredicate]>,
+    mut visit: impl FnMut(&RelRow, usize, Source<'a>) -> Result<bool, String>,
 ) -> Result<(), String> {
     let needs_opcode = columns
         .iter()
@@ -1002,8 +1272,13 @@ fn visit_source(
         || columns
             .iter()
             .any(|column| matches!(*column, "access_flags" | "method_kind"));
-    for file in &ds.files {
-        let mut cells = Cells::new(file, needs_definitions && table == "methods", columns);
+    for (file_index, file) in ds.files.iter().enumerate() {
+        let mut cells = Cells::new(
+            file,
+            table,
+            needs_definitions && table == "methods",
+            columns,
+        );
         let mut row = RelRow::with_capacity(columns.len());
         let mut consume = |source| {
             row.values.clear();
@@ -1031,10 +1306,71 @@ fn visit_source(
                 let value = cells.value(source, column, opcode.as_ref());
                 row.put(alias, column, value);
             }
-            visit(&row)
+            visit(&row, file_index, source)
         };
         match table {
-            "methods" => {
+            "dex_files" => {
+                if consume(Source::File)? {
+                    return Ok(());
+                }
+            }
+            "strings" => {
+                for index in 0..file.strings.len() as u32 {
+                    if consume(Source::PoolString(index))? {
+                        return Ok(());
+                    }
+                }
+            }
+            "type_ids" | "types" => {
+                for index in 0..file.types.len() as u32 {
+                    if consume(Source::PoolType(index))? {
+                        return Ok(());
+                    }
+                }
+            }
+            "type_lists" => {
+                for (off, end) in type_list_offsets(file) {
+                    if consume(Source::TypeList { off, end })? {
+                        return Ok(());
+                    }
+                }
+            }
+            "type_list_entries" => {
+                for (off, _) in type_list_offsets(file) {
+                    let size = read_u32_at(file.raw(), off) as usize;
+                    for ordinal in 0..size {
+                        let type_idx = read_u16_at(file.raw(), off + 4 + ordinal * 2);
+                        if consume(Source::TypeListEntry {
+                            off,
+                            ordinal,
+                            type_idx,
+                        })? {
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+            "proto_ids" | "protos" => {
+                for index in 0..file.protos.len() as u32 {
+                    if consume(Source::PoolProto(index))? {
+                        return Ok(());
+                    }
+                }
+            }
+            "proto_params" => {
+                for (proto_idx, proto) in file.protos.iter().enumerate() {
+                    for (ordinal, type_idx) in proto.parameters.iter().copied().enumerate() {
+                        if consume(Source::ProtoParam {
+                            proto_idx: proto_idx as u32,
+                            ordinal,
+                            type_idx,
+                        })? {
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+            "methods" | "method_ids" => {
                 for index in 0..file.methods.len() as u32 {
                     if consume(Source::Method(index))? {
                         return Ok(());
@@ -1048,7 +1384,7 @@ fn visit_source(
                     }
                 }
             }
-            "fields" => {
+            "fields" | "field_ids" => {
                 for index in 0..file.fields.len() as u32 {
                     if consume(Source::Field(index))? {
                         return Ok(());
@@ -1173,6 +1509,228 @@ mod tests {
             assert_eq!(render(streamed), render(generic), "{sql}");
         }
     }
+    fn render(output: SelectOutput) -> (Vec<String>, Vec<Vec<Scalar>>) {
+        (
+            output.columns,
+            output.rows.into_iter().map(|row| row.values).collect(),
+        )
+    }
+
+    #[test]
+    fn pool_sources_stream_and_match_materialized_scans() {
+        let ds = fixture();
+        let caches = NamedCaches::default();
+        let mut queries = Vec::new();
+        for (table, pool, index) in [
+            ("dex_files", "file_id", "file_id"),
+            ("strings", "string_pool_id", "string_idx"),
+            ("type_ids", "file_id", "type_idx"),
+            ("types", "file_id", "type_idx"),
+            ("type_lists", "file_id", "type_list_off"),
+            ("type_list_entries", "file_id", "ordinal"),
+            ("proto_ids", "file_id", "proto_idx"),
+            ("protos", "file_id", "proto_idx"),
+            ("proto_params", "file_id", "ordinal"),
+            ("field_ids", "file_id", "field_idx"),
+            ("method_ids", "file_id", "method_idx"),
+        ] {
+            // Unordered full projections also compare the observable scan order.
+            queries.push(format!("SELECT * FROM {table}"));
+            queries.push(format!("SELECT q.* FROM {table} q LIMIT 2 OFFSET 1"));
+            queries.push(format!(
+                "SELECT count(*),count(DISTINCT {index}) FROM {table}"
+            ));
+            queries.push(format!("SELECT {pool},count(*),sum({index}),avg({index}),min({index}),max({index}) FROM {table} GROUP BY {pool} ORDER BY {pool}"));
+            queries.push(format!(
+                "SELECT DISTINCT {pool} FROM {table} ORDER BY {pool}"
+            ));
+            queries.push(format!("SELECT q.{index} AS k FROM {table} q WHERE q.{index} BETWEEN 0 AND 2 ORDER BY k DESC LIMIT 2 OFFSET 1"));
+            queries.push(format!(
+                "SELECT {index}+1 AS n FROM {table} WHERE {index} IN (0,1,3) ORDER BY n LIMIT 2"
+            ));
+            queries.push(format!("SELECT {index} FROM {table} WHERE {index}<0"));
+            queries.push(format!("SELECT {index} FROM {table} LIMIT 0"));
+        }
+        queries.extend([
+            "SELECT value,length(value) FROM strings WHERE value LIKE '%a%' ORDER BY value LIMIT 3",
+            "SELECT descriptor,java_name FROM types WHERE descriptor IS NOT NULL ORDER BY java_name",
+            "SELECT shorty,count(*),sum(param_count) FROM protos GROUP BY shorty HAVING count(*)>0 ORDER BY shorty",
+            "SELECT param_descriptors FROM protos WHERE param_count=0 ORDER BY proto_idx",
+            "SELECT descriptor,count(*) FROM proto_params GROUP BY descriptor ORDER BY descriptor",
+            "SELECT name_idx,class_idx FROM method_ids WHERE name_idx>=0 ORDER BY name_idx DESC LIMIT 1",
+        ].into_iter().map(str::to_owned));
+        for sql in queries {
+            let query = parse(&sql);
+            let select = query.body.as_select().unwrap();
+            let mut streamed = execute(&query, select, &ds, &caches, None)
+                .unwrap_or_else(|| panic!("streaming source not selected: {sql}"))
+                .unwrap_or_else(|error| panic!("streaming {sql}: {error}"));
+            let mut generic =
+                execute_select_core(select, &ds, Some(&ds), &caches, true, None, None)
+                    .unwrap_or_else(|error| panic!("generic {sql}: {error}"));
+            apply_query_order_limit(&mut streamed, &query, None).unwrap();
+            apply_query_order_limit(&mut generic, &query, None).unwrap();
+            assert_eq!(render(streamed), render(generic), "{sql}");
+        }
+    }
+
+    #[test]
+    fn pool_scans_do_not_retain_decoded_cells_or_unrelated_descriptor_caches() {
+        let ds = fixture();
+        let file = &ds.files[0];
+        let mut strings = Cells::new(file, "strings", false, &["value"]);
+        for index in 0..file.strings.len() as u32 {
+            assert_eq!(strings.string(index), Scalar::text(file.string(index)));
+        }
+        assert!(strings.strings.is_empty());
+        let mut types = Cells::new(file, "types", false, &["descriptor", "java_name"]);
+        for index in 0..file.types.len() as u32 {
+            assert_eq!(types.typ(index), Scalar::text(file.type_descriptor(index)));
+        }
+        assert!(types.strings.is_empty());
+        assert!(types.methods.is_empty());
+        assert!(types.fields.is_empty());
+        let classes = Cells::new(file, "classes", false, &["descriptor"]);
+        assert!(classes.methods.is_empty());
+        assert!(classes.fields.is_empty());
+        let mut methods = Cells::new(file, "methods", false, &["descriptor"]);
+        for index in 0..file.methods.len() as u32 {
+            assert_eq!(
+                methods.method(index),
+                Scalar::text(file.method_descriptor_direct(index))
+            );
+        }
+        assert!(methods.methods.is_empty());
+        assert!(methods.fields.is_empty());
+        assert!(methods.strings.is_empty());
+        let mut fields = Cells::new(file, "fields", false, &["descriptor"]);
+        for index in 0..file.fields.len() as u32 {
+            assert_eq!(
+                fields.field(index),
+                Scalar::text(file.field_descriptor_direct(index))
+            );
+        }
+        assert!(fields.fields.is_empty());
+        assert!(fields.methods.is_empty());
+        assert!(fields.strings.is_empty());
+    }
+
+    #[test]
+    fn caller_owned_input_keeps_qualified_group_cells_and_requests_only_used_columns() {
+        let query = parse(
+            "SELECT l.file_id,count(r.name) AS n FROM methods l JOIN methods r ON l.method_idx=r.method_idx GROUP BY l.file_id HAVING n>0 ORDER BY n DESC,l.file_id",
+        );
+        let schema = [
+            "file_id",
+            "l.file_id",
+            "l.method_idx",
+            "r.method_idx",
+            "r.name",
+        ]
+        .map(str::to_owned);
+        let mut output = execute_input(
+            &query,
+            query.body.as_select().unwrap(),
+            &schema,
+            None,
+            |requested, visit| {
+                assert_eq!(requested, &["l.file_id", "r.name"]);
+                let mut row = RelRow::default();
+                for (file_id, name) in [(2, "first"), (1, "second"), (2, "third")] {
+                    row.values.clear();
+                    row.put("l", "file_id", Scalar::Int(file_id));
+                    row.put("r", "name", Scalar::text(name));
+                    if visit(&row)? {
+                        break;
+                    }
+                }
+                Ok(())
+            },
+        )
+        .unwrap()
+        .unwrap();
+        apply_query_order_limit(&mut output, &query, None).unwrap();
+        assert_eq!(
+            render(output).1,
+            vec![
+                vec![Scalar::Int(2), Scalar::Int(2)],
+                vec![Scalar::Int(1), Scalar::Int(1)],
+            ]
+        );
+    }
+
+    #[test]
+    fn caller_owned_input_stops_after_offset_and_limit() {
+        let query = parse(
+            "SELECT l.method_idx FROM methods l JOIN methods r ON l.method_idx=r.method_idx LIMIT 2 OFFSET 1",
+        );
+        let schema = ["l.method_idx".to_owned()];
+        let mut visits = 0;
+        let mut output = execute_input(
+            &query,
+            query.body.as_select().unwrap(),
+            &schema,
+            None,
+            |requested, visit| {
+                assert_eq!(requested, &schema);
+                let mut row = RelRow::default();
+                for index in 0..100 {
+                    visits += 1;
+                    row.values.clear();
+                    row.put("l", "method_idx", Scalar::Int(index));
+                    if visit(&row)? {
+                        break;
+                    }
+                }
+                Ok(())
+            },
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(visits, 3);
+        apply_query_order_limit(&mut output, &query, None).unwrap();
+        assert_eq!(
+            render(output).1,
+            vec![vec![Scalar::Int(1)], vec![Scalar::Int(2)]]
+        );
+    }
+
+    #[test]
+    fn large_membership_lists_work_in_all_streaming_sink_positions() {
+        let ds = fixture();
+        let caches = NamedCaches::default();
+        let numbers = (0..128)
+            .map(|value| value.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let strings = (0..128)
+            .map(|value| format!("'unused{value}'"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let queries = [
+            format!("SELECT method_idx,method_idx IN ({numbers},NULL) FROM methods ORDER BY file_id,method_idx"),
+            format!("SELECT method_idx FROM methods WHERE method_idx IN ({numbers}) ORDER BY file_id,method_idx"),
+            format!("SELECT method_idx FROM methods WHERE method_idx NOT IN ({numbers},NULL) ORDER BY file_id,method_idx"),
+            format!("SELECT method_idx FROM methods WHERE NOT (method_idx IN ({numbers},NULL)) ORDER BY file_id,method_idx"),
+            format!("SELECT method_idx FROM methods WHERE name IN ({strings},'alpha') ORDER BY file_id,method_idx"),
+            format!("SELECT file_id,count(method_idx IN ({numbers},NULL)) FROM methods GROUP BY file_id ORDER BY file_id"),
+            format!("SELECT file_id,count(*) AS n FROM methods GROUP BY file_id HAVING count(*) IN ({numbers}) ORDER BY file_id"),
+            format!("SELECT file_id,method_idx FROM methods ORDER BY method_idx IN ({numbers}) DESC,file_id,method_idx LIMIT 3"),
+        ];
+        for sql in queries {
+            let query = parse(&sql);
+            let select = query.body.as_select().unwrap();
+            let mut streamed = execute(&query, select, &ds, &caches, None)
+                .unwrap()
+                .unwrap();
+            let mut generic =
+                execute_select_core(select, &ds, Some(&ds), &caches, true, None, None).unwrap();
+            apply_query_order_limit(&mut streamed, &query, None).unwrap();
+            apply_query_order_limit(&mut generic, &query, None).unwrap();
+            assert_eq!(render(streamed), render(generic), "{sql}");
+        }
+    }
+
     #[test]
     fn named_relations_and_invalid_qualifiers_do_not_bypass_resolution() {
         let ds = fixture();
@@ -1191,5 +1749,152 @@ mod tests {
             None
         )
         .is_none());
+    }
+
+    fn stream_values(sql: &str, values: &[Scalar]) -> Vec<Vec<Scalar>> {
+        let query = parse(sql);
+        let schema = ["k".to_owned(), "r.k".to_owned()];
+        let mut output = execute_input(
+            &query,
+            query.body.as_select().unwrap(),
+            &schema,
+            None,
+            |_, visit| {
+                let mut row = RelRow::default();
+                for value in values {
+                    row.values.clear();
+                    row.put("r", "k", value.clone());
+                    if visit(&row)? {
+                        break;
+                    }
+                }
+                Ok(())
+            },
+        )
+        .unwrap()
+        .unwrap();
+        apply_query_order_limit(&mut output, &query, None).unwrap();
+        output.rows.into_iter().map(|row| row.values).collect()
+    }
+
+    #[test]
+    fn grouping_merges_integer_real_keys_and_keeps_text_separate() {
+        let values = [
+            Scalar::Int(1),
+            Scalar::Real("1.0".to_owned()),
+            Scalar::text("1"),
+            Scalar::Int(2),
+            Scalar::Null,
+            Scalar::Null,
+        ];
+        assert_eq!(
+            stream_values(
+                "SELECT k,count(*) FROM methods r GROUP BY k ORDER BY k",
+                &values
+            ),
+            vec![
+                vec![Scalar::Null, Scalar::Int(2)],
+                vec![Scalar::Int(1), Scalar::Int(2)],
+                vec![Scalar::Int(2), Scalar::Int(1)],
+                vec![Scalar::text("1"), Scalar::Int(1)],
+            ]
+        );
+        let ds = fixture();
+        let sql = "SELECT k,count(*) FROM (SELECT 1 AS k UNION ALL SELECT 1.0 UNION ALL SELECT '1' UNION ALL SELECT 2 UNION ALL SELECT NULL UNION ALL SELECT NULL) r GROUP BY k ORDER BY k";
+        assert_eq!(
+            execute_statement(sql, Some(&ds), &NamedCaches::default(), None)
+                .unwrap()
+                .rows,
+            vec![
+                vec!["NULL".to_owned(), "2".to_owned()],
+                vec!["1".to_owned(), "2".to_owned()],
+                vec!["2".to_owned(), "1".to_owned()],
+                vec!["1".to_owned(), "1".to_owned()],
+            ]
+        );
+    }
+
+    #[test]
+    fn aggregate_distinct_preserves_integers_above_f64_exact_precision() {
+        let values = [
+            Scalar::Int(9007199254740992),
+            Scalar::Int(9007199254740993),
+            Scalar::Real("9007199254740992.0".to_owned()),
+            Scalar::Int(1),
+            Scalar::Real("1.0".to_owned()),
+            Scalar::text("1"),
+            Scalar::Null,
+        ];
+        assert_eq!(
+            stream_values("SELECT count(DISTINCT k) FROM methods r", &values),
+            vec![vec![Scalar::Int(4)]]
+        );
+        let ds = fixture();
+        let sql = "SELECT count(DISTINCT k) FROM (SELECT 9007199254740992 AS k UNION ALL SELECT 9007199254740993 UNION ALL SELECT 9007199254740992.0 UNION ALL SELECT 1 UNION ALL SELECT 1.0 UNION ALL SELECT '1' UNION ALL SELECT NULL) r";
+        assert_eq!(
+            execute_statement(sql, Some(&ds), &NamedCaches::default(), None)
+                .unwrap()
+                .rows,
+            vec![vec!["4".to_owned()]]
+        );
+    }
+
+    #[test]
+    fn output_distinct_uses_numeric_identity_and_retains_null_nan_separately() {
+        let values = [
+            Scalar::Int(1),
+            Scalar::Real("1.0".to_owned()),
+            Scalar::text("1"),
+            Scalar::Null,
+            Scalar::Null,
+            Scalar::Int(9007199254740992),
+            Scalar::Int(9007199254740993),
+            Scalar::Real("9007199254740992.0".to_owned()),
+        ];
+        assert_eq!(
+            stream_values("SELECT DISTINCT k FROM methods r ORDER BY k", &values),
+            vec![
+                vec![Scalar::Null],
+                vec![Scalar::Int(1)],
+                vec![Scalar::Int(9007199254740992)],
+                vec![Scalar::Int(9007199254740993)],
+                vec![Scalar::text("1")],
+            ]
+        );
+        let ds = fixture();
+        let sql = "SELECT DISTINCT k FROM (SELECT 1 AS k UNION ALL SELECT 1.0 UNION ALL SELECT '1' UNION ALL SELECT NULL UNION ALL SELECT NULL UNION ALL SELECT 9007199254740992 UNION ALL SELECT 9007199254740993 UNION ALL SELECT 9007199254740992.0) r ORDER BY k";
+        assert_eq!(
+            execute_statement(sql, Some(&ds), &NamedCaches::default(), None)
+                .unwrap()
+                .rows,
+            vec![
+                vec!["NULL".to_owned()],
+                vec!["1".to_owned()],
+                vec!["9007199254740992".to_owned()],
+                vec!["9007199254740993".to_owned()],
+                vec!["1".to_owned()],
+            ]
+        );
+        assert_ne!(
+            membership::set_key(&Scalar::Null),
+            membership::set_key(&Scalar::Real("NaN".to_owned()))
+        );
+        assert_eq!(
+            membership::set_key(&Scalar::Real("NaN".to_owned())),
+            membership::set_key(&Scalar::Real("-NaN".to_owned()))
+        );
+        assert_eq!(membership::key(&Scalar::Real("NaN".to_owned())), None);
+        assert_eq!(
+            stream_values(
+                "SELECT DISTINCT k FROM methods r",
+                &[
+                    Scalar::Null,
+                    Scalar::Real("NaN".to_owned()),
+                    Scalar::Real("-NaN".to_owned())
+                ]
+            )
+            .len(),
+            2
+        );
     }
 }
