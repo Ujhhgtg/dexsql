@@ -1992,16 +1992,18 @@ fn find_trim_syntax_rejection(
 ) -> Option<Option<(usize, usize)>> {
     use sqlparser::ast::Expr;
     let mut rejected: Option<Option<(usize, usize)>> = None;
-    let mut visit = |expr: &Expr, _visit: &mut dyn FnMut(&Expr)| if let Expr::Trim {
+    let mut visit = |expr: &Expr, _visit: &mut dyn FnMut(&Expr)| {
+        if let Expr::Trim {
             trim_where,
             trim_what,
             ..
-        } = expr {
-        if (trim_where.is_some() || trim_what.is_some())
-            && rejected.is_none() {
+        } = expr
+        {
+            if (trim_where.is_some() || trim_what.is_some()) && rejected.is_none() {
                 let span = trim_what.as_ref().and_then(|what| expr_span(what, sql));
                 rejected = Some(span);
             }
+        }
     };
     let _ = &mut visit;
     for statement in statements {
@@ -2058,7 +2060,6 @@ fn line_column_to_offset(sql: &str, line: usize, column: usize) -> usize {
 
 /// Walk the expressions of a query's SELECT bodies and set operations.
 fn walk_query_exprs(query: &sqlparser::ast::Query, visit: &mut dyn FnMut(&sqlparser::ast::Expr)) {
-    
     walk_set_expr_exprs(query.body.as_ref(), visit);
 }
 
@@ -2302,9 +2303,10 @@ fn scalar_from_rendered(value: &str) -> Scalar {
         return Scalar::Int(number);
     }
     if (value.contains('.') || value.contains('e') || value.contains('E'))
-        && value.parse::<f64>().is_ok() {
-            return Scalar::Real(value.to_owned());
-        }
+        && value.parse::<f64>().is_ok()
+    {
+        return Scalar::Real(value.to_owned());
+    }
     Scalar::text(value.to_owned())
 }
 
@@ -7197,11 +7199,7 @@ fn scan_code_items(
                 Scalar::Int(code.debug_info_off as i64),
             );
             row.put(alias, "insns_size", Scalar::Int(code.insns.len() as i64));
-            row.put(
-                alias,
-                "insns_off",
-                Scalar::Int(code.code_off as i64 + 16),
-            );
+            row.put(alias, "insns_off", Scalar::Int(code.code_off as i64 + 16));
             row.put(
                 alias,
                 "tries_off",
@@ -7743,10 +7741,9 @@ fn scan_methods(
             let name = file.method_name(idx);
             let return_descriptor = file.type_descriptor(proto.return_type_idx);
             let param_count = proto.parameters.len() as i64;
-            let needs_descriptor = scan_columns.is_none_or(|columns| {
-                columns.contains("descriptor") || columns.contains("method")
-            }) || key_filter
-                .is_some_and(|(column, _)| matches!(column, "descriptor" | "method"))
+            let needs_descriptor = scan_columns
+                .is_none_or(|columns| columns.contains("descriptor") || columns.contains("method"))
+                || key_filter.is_some_and(|(column, _)| matches!(column, "descriptor" | "method"))
                 || predicates.is_some_and(|items| {
                     items
                         .iter()
@@ -10069,8 +10066,7 @@ fn eval_scalar(
             for characters in trim_characters.iter().flatten() {
                 values.push(eval_scalar(characters, row, group)?);
             }
-            scalar_functions::eval_scalar_function("trim", &values)
-                .unwrap_or(Ok(Scalar::Null))
+            scalar_functions::eval_scalar_function("trim", &values).unwrap_or(Ok(Scalar::Null))
         }
         Expr::Function(f) => {
             let name = f
