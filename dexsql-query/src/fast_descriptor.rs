@@ -1274,6 +1274,16 @@ fn access_filter_for_alias(
                     .using_types
                     .push(pred.text().ok_or("bad field access using type")?.to_owned());
             }
+            "field_name" if matches!(pred.kind, PredKind::Eq) => {
+                filter
+                    .field_names
+                    .push(pred.text().ok_or("bad field access name")?.to_owned());
+            }
+            "field_type" if matches!(pred.kind, PredKind::Eq) => {
+                filter
+                    .field_types
+                    .push(pred.text().ok_or("bad field access type")?.to_owned());
+            }
             "file_id" | "method_idx" => {}
             _ => return Err("unsupported fast field access predicate".into()),
         }
@@ -1312,6 +1322,26 @@ fn field_access_methods(file: &DexFile, filter: &RelationAccessFilter) -> HashSe
                     .any(|value| value.as_str() == access_using_type(access.opcode))
             {
                 return false;
+            }
+            if !filter.field_names.is_empty() || !filter.field_types.is_empty() {
+                let Some((name, field_type)) =
+                    field_descriptor_parts(file.field_descriptor_ref(access.field_idx))
+                else {
+                    return false;
+                };
+                if !filter.field_names.is_empty()
+                    && !filter.field_names.iter().any(|value| value.as_str() == name)
+                {
+                    return false;
+                }
+                if !filter.field_types.is_empty()
+                    && !filter
+                        .field_types
+                        .iter()
+                        .any(|value| value.as_str() == field_type)
+                {
+                    return false;
+                }
             }
             true
         })
@@ -2153,7 +2183,17 @@ struct FieldAccessUnit {
 #[derive(Debug, Clone, Default)]
 struct RelationAccessFilter {
     fields: Vec<String>,
+    field_names: Vec<String>,
+    field_types: Vec<String>,
     using_types: Vec<String>,
+}
+
+/** Split a field descriptor ("Lpkg/Class;->name:Type;") into its name and type descriptor. */
+fn field_descriptor_parts(descriptor: &str) -> Option<(&str, &str)> {
+    let arrow = descriptor.find("->")?;
+    let rest = &descriptor[arrow + 2..];
+    let colon = rest.find(':')?;
+    Some((&rest[..colon], &rest[colon + 1..]))
 }
 
 fn run_field_lookup(
@@ -2554,6 +2594,22 @@ mod tests {
         assert!(
             fast.is_some(),
             "opcode_count method lookup must use the fast path"
+        );
+    }
+
+    #[test]
+    fn accepts_method_access_field_type_predicate() {
+        // Shape emitted by WeKit's method-level usingField { type = ... } matcher: the access unit
+        // filters the accessed field type descriptor instead of the full field descriptor.
+        let sql = "SELECT DISTINCT m.descriptor AS method FROM methods m \
+             JOIN method_field_accesses uf0 ON uf0.method = m.descriptor \
+             WHERE m.name = 'run' AND uf0.file_id = m.file_id \
+               AND uf0.method_idx = m.method_idx AND uf0.field_type = 'I' \
+             ORDER BY m.descriptor;";
+        let fast = try_fast_descriptor_lookup(&parse(sql), &Dataset::default(), None);
+        assert!(
+            fast.is_some(),
+            "method field-access type predicate must use the fast path"
         );
     }
 
