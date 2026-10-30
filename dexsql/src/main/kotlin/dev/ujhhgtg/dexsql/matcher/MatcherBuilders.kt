@@ -198,7 +198,7 @@ private fun annotationValue(value: Any?): AnnotationValue =
 internal fun buildAnnotation(block: AnnotationMatcher.() -> Unit): AnnotationSpec =
     AnnotationMatcher().apply(block).build()
 
-class ClassMatcher internal constructor() {
+class ClassMatcher {
     private var classNameValue: NameSpec? = null
 
     /** Accepts `className = "com.foo.Bar"` or a [NameSpec]; null clears the constraint. */
@@ -483,7 +483,7 @@ class ClassMatcher internal constructor() {
         )
 }
 
-class MethodMatcher internal constructor() {
+class MethodMatcher {
     var descriptor: String? = null
 
     private var nameValue: NameSpec? = null
@@ -829,7 +829,7 @@ class MethodMatcher internal constructor() {
         )
 }
 
-class FieldMatcher internal constructor() {
+class FieldMatcher {
     private var nameValue: NameSpec? = null
 
     /** Accepts `name = "field"` or a [NameSpec]; null clears the constraint. */
