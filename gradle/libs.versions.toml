@@ -10,7 +10,7 @@ spotless = "8.10.4"
 # noinspection UnusedVersionCatalogEntry
 jdk = "21"
 # noinspection UnusedVersionCatalogEntry
-minSdk = "21"
+minSdk = "26"
 # noinspection UnusedVersionCatalogEntry
 compileSdk = "37"
 # noinspection UnusedVersionCatalogEntry

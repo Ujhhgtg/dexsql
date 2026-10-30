@@ -1,8 +1,12 @@
 package dev.ujhhgtg.dexsql
 
 import java.io.File
-import java.nio.file.Files
-import java.nio.file.StandardCopyOption
+import java.io.InputStream
+import java.nio.file.Path
+import kotlin.io.path.absolutePathString
+import kotlin.io.path.createTempDirectory
+import kotlin.io.path.div
+import kotlin.io.path.outputStream
 
 /**
  * Locates and loads `libdexsql_jni` once per class loader.
@@ -64,13 +68,23 @@ object DexSqlLibrary {
             System.loadLibrary(LIBRARY_NAME)
             return
         }
-        val directory = Files.createTempDirectory("dexsql-jni-")
-        val target = directory.resolve(System.mapLibraryName(LIBRARY_NAME))
-        stream.use { Files.copy(it, target, StandardCopyOption.REPLACE_EXISTING) }
-        target.toFile().deleteOnExit()
-        directory.toFile().deleteOnExit()
-        System.load(target.toAbsolutePath().toString())
+        val directory = createTempDirectory("dexsql-jni-")
+        val target = directory / System.mapLibraryName(LIBRARY_NAME)
+        stream.copyTo(target)
+        target.deleteOnExit()
+        directory.deleteOnExit()
+        System.load(target.absolutePathString())
     }
+
+    /** Copies this resource stream to [path], replacing a file left over from an earlier load. */
+    private fun InputStream.copyTo(path: Path) {
+        path.outputStream().use { outputStream ->
+            this.use { it.copyTo(outputStream) }
+        }
+    }
+
+    /** Kotlin-style form of [File.deleteOnExit] for a path. */
+    private fun Path.deleteOnExit() = toFile().deleteOnExit()
 
     /** Classpath location used by the desktop natives jars, or null on unsupported hosts. */
     internal fun bundledResourcePath(): String? {
