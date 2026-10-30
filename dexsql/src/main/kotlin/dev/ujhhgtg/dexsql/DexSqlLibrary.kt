@@ -19,6 +19,7 @@ import java.nio.file.StandardCopyOption
  * call [load] with the same path, or call `System.loadLibrary` from a class in the same class
  * loader before touching [DexSqlBridge].
  */
+@Suppress("UnsafeDynamicallyLoadedCode")
 object DexSqlLibrary {
     const val LIBRARY_NAME = "dexsql_jni"
     const val PATH_PROPERTY = "dexsql.library.path"
