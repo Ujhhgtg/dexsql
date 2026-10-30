@@ -1,0 +1,26 @@
+[package]
+name = "dexsql-jni"
+version = "0.1.0"
+edition = "2024"
+description = "JNI bridge between dexsql-rs and the dev.ujhhgtg.dexsql Kotlin library"
+license = "Apache-2.0"
+repository = "https://github.com/Ujhhgtg/dexsql"
+publish = false
+
+# Standalone: never join a parent workspace when this repository is nested in another checkout.
+[workspace]
+
+[lib]
+name = "dexsql_jni"
+crate-type = ["cdylib"]
+
+[dependencies]
+dexsql = { git = "https://github.com/Ujhhgtg/dexsql-rs.git", rev = "3703574990cf160d0bb31bd8ab8afd6253a6a554" }
+jni-sys = "0.4.1"
+serde_json = "1"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
