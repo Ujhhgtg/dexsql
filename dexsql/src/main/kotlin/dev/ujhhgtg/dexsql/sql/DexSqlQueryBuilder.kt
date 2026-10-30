@@ -148,7 +148,7 @@ private fun packageCondition(column: String, searchPackages: List<String>): Stri
 /** Exclude-package prefix condition: NOT (OR prefix matches) over one descriptor column. */
 private fun packageExcludeCondition(column: String, excludePackages: List<String>): String? {
     val include = packageCondition(column, excludePackages) ?: return null
-    return "NOT " + include
+    return "NOT $include"
 }
 
 /** Inclusive count conditions for a class column (equality when min == max). */
@@ -529,14 +529,14 @@ private fun appendAnnotationConstraints(
     where: MutableList<String>,
 ) {
     constraints.forEachIndexed { index, constraint ->
-        val alias = "ar" + index
+        val alias = "ar$index"
         joins += "JOIN annotation_elements_resolved $alias ON $alias.owner = $anchorColumn"
-        where += alias + ".owner_kind = 'class'"
+        where += "$alias.owner_kind = 'class'"
         where += alias + ".annotation = " + sqlQuote(classDescriptor(constraint.type))
-        constraint.visibility?.let { where += alias + ".visibility = " + it }
+        constraint.visibility?.let { where += "$alias.visibility = $it" }
         constraint.elementName?.let { name ->
             where += alias + ".element_name = " + sqlQuote(name)
-            where += alias + ".value_kind = 'array'"
+            where += "$alias.value_kind = 'array'"
             constraint.values.forEachIndexed { ordinal, value ->
                 val element = "ae" + index + "_" + ordinal
                 val dexFile = "d" + index + "_" + ordinal
@@ -565,11 +565,11 @@ private fun appendAnnotationConstraints(
                         ".string_idx = " +
                         element +
                         ".value_index"
-                where += element + ".file_id = " + alias + ".file_id"
-                where += element + ".depth = 1"
-                where += element + ".ordinal = " + ordinal
-                where += element + ".value_kind = 'string'"
-                where += strings + ".string_pool_id = " + dexFile + ".string_pool_id"
+                where += "$element.file_id = $alias.file_id"
+                where += "$element.depth = 1"
+                where += "$element.ordinal = $ordinal"
+                where += "$element.value_kind = 'string'"
+                where += "$strings.string_pool_id = $dexFile.string_pool_id"
                 where += strings + ".value = " + sqlQuote(value)
             }
         }
