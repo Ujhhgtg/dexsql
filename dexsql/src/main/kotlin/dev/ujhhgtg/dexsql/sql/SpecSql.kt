@@ -188,7 +188,6 @@ internal fun MethodSpec.toSqlMethodQueryOrNull(
     constructor: Boolean = false,
     nested: Boolean = false,
 ): SqlMethodQuery? {
-    if (nested && descriptor != null) return null
     if (nested && usingFields.isNotEmpty()) return null
     if (nested && searchPackages.isNotEmpty()) return null
     if (nested && excludePackages.isNotEmpty()) return null
@@ -383,7 +382,8 @@ internal fun ClassSpec.toSqlClassQueryOrNull(): SqlClassQuery? {
 }
 
 private fun SqlMethodQuery.hasMatcherPredicates(): Boolean =
-    name != null ||
+    descriptor != null ||
+        name != null ||
         modifiers != null ||
         declaredClass != null ||
         returnType != null ||

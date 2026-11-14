@@ -560,6 +560,7 @@ class QueryMatcherScope(
         searchPackages: List<String>,
     ): List<(SqlMethodQuery) -> Unit>? {
         val steps = mutableListOf<(SqlMethodQuery) -> Unit>()
+        spec.descriptor?.let { descriptor -> steps += { query -> query.descriptor = descriptor } }
         spec.name
             ?.takeIf { it.match == NameMatch.Equals }
             ?.let { nameSpec ->
@@ -1047,7 +1048,8 @@ class QueryMatcherScope(
      * otherwise broad matcher would scan a huge field set (same policy as broad field types).
      */
     private fun methodSpecIsSelectiveForAccessUnit(spec: MethodSpec): Boolean =
-        spec.name?.match == NameMatch.Equals ||
+        spec.descriptor != null ||
+            spec.name?.match == NameMatch.Equals ||
             spec.paramCount != null ||
             spec.paramTypes != null ||
             spec.returnType?.className != null ||

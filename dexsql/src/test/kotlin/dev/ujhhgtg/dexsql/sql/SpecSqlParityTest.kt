@@ -8,6 +8,7 @@ import dev.ujhhgtg.dexsql.matcher.usingField
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertNull
+import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 
 /**
@@ -15,6 +16,25 @@ import org.junit.jupiter.api.Test
  * only authoring form. SQL-inexpressible specs must fall back to the matcher, not throw.
  */
 class SpecSqlParityTest {
+    @Test
+    fun descriptorOnlyFieldAccessorsStayInSql() {
+        for (read in listOf(true, false)) {
+            val spec = fieldSpec {
+                type("java.util.List")
+                if (read) {
+                    readMethod { descriptor = "Lcom/test/Adapter;->getItem(I)Ljava/lang/Object;" }
+                } else {
+                    writeMethod { descriptor = "Lcom/test/Adapter;->setItem(Ljava/lang/Object;)V" }
+                }
+            }
+            val sql = requireNotNull(spec.toSqlOrNull())
+            assertTrue(sql.contains("JOIN method_field_accesses fa0"), sql)
+            assertTrue(sql.contains("fm0.descriptor = 'Lcom/test/Adapter;->"), sql)
+            assertTrue(sql.contains("fa0.using_type = '" + if (read) "get'" else "put'"), sql)
+            assertTrue(sql.contains("f.type_descriptor = 'Ljava/util/List;'"), sql)
+        }
+    }
+
     @Test
     fun methodSpecEmitsCanonicalMethodSql() {
         val spec = methodSpec {

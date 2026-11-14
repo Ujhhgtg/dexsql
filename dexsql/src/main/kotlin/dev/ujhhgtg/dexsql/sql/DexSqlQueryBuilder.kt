@@ -324,6 +324,7 @@ private fun nameMatchCondition(
     }
 
 private class MethodProperties(
+    val descriptor: String? = null,
     val name: String?,
     val classNameMatch: SqlNameMatch?,
     val returnTypeMatch: SqlNameMatch?,
@@ -338,7 +339,8 @@ private class MethodProperties(
 private class MethodJoinResult(val joins: List<String>, val where: List<String>, val nextIndex: Int)
 
 private fun MethodProperties.hasPredicates(): Boolean =
-    name != null ||
+    descriptor != null ||
+        name != null ||
         classNameMatch != null ||
         returnTypeMatch != null ||
         paramCount != null ||
@@ -356,8 +358,9 @@ private class ClassUnit(
     val nestedMethodMatcher: Boolean = false,
 )
 
-private fun SqlMethodQuery.toMethodProperties(includeModifiers: Boolean = false): MethodProperties =
+private fun SqlMethodQuery.toMethodProperties(nested: Boolean = false): MethodProperties =
     MethodProperties(
+        descriptor = if (nested) descriptor else null,
         name = name,
         classNameMatch =
             declaredClassMatch
@@ -368,7 +371,7 @@ private fun SqlMethodQuery.toMethodProperties(includeModifiers: Boolean = false)
         paramCount = paramCount,
         paramCountRange = paramCountRange,
         opcodeCountRange = opcodeCountRange,
-        modifiers = if (includeModifiers) modifiers else null,
+        modifiers = if (nested) modifiers else null,
     )
 
 /**
@@ -392,6 +395,7 @@ private fun methodJoins(
         index = appendNumberLiteralJoins(numberCall, baseAlias, index, joins, where)
     }
     if (properties != null) {
+        properties.descriptor?.let { where += baseAlias + ".descriptor = " + sqlQuote(it) }
         properties.name?.let { where += baseAlias + ".name = " + sqlQuote(it) }
         properties.classNameMatch?.let {
             where += nameMatchCondition("$baseAlias.class_descriptor", it, SqlNameLiteralKind.Class)
@@ -722,7 +726,7 @@ internal fun emitClass(query: SqlClassQuery): String {
     }
     for (methodQuery in query.methods) {
         requireNestedMethod(methodQuery)
-        val properties = methodQuery.toMethodProperties(includeModifiers = true)
+        val properties = methodQuery.toMethodProperties(nested = true)
         // An unconstrained unit is vacuously satisfied by every method and the extractor rejects
         // it; refuse it here too instead of emitting a meaningless extra methods join.
         require(
@@ -905,7 +909,7 @@ internal fun emitField(query: SqlFieldQuery): String {
                 access.query.literals.numberCalls,
                 methodAlias,
                 start,
-                access.query.toMethodProperties(includeModifiers = true),
+                access.query.toMethodProperties(nested = true),
             )
         joins += result.joins
         where += result.where

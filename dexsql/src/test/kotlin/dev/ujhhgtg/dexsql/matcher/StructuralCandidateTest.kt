@@ -19,6 +19,23 @@ import org.junit.jupiter.api.Test
  * these tests assert both the generated SQL shape and the matcher behaviour.
  */
 class StructuralCandidateTest {
+    @Test
+    fun descriptorOnlyReadMethodDrivesFieldCandidates() {
+        val (scope, query) = fieldScope()
+        val spec = fieldSpec {
+            type("int")
+            readMethod { descriptor = MatcherFixtures.ALPHA_RUN }
+        }
+        assertEquals(
+            listOf(MatcherFixtures.ALPHA_COUNT_FIELD),
+            scope.findFields(spec).map { it.descriptor },
+        )
+        assertTrue(query.queries.isNotEmpty())
+        assertTrue(
+            query.queries.all { it.contains("fm0.descriptor = '${MatcherFixtures.ALPHA_RUN}'") },
+        )
+    }
+
     private val metadata = MatcherFixtures.metadata
     private val relations =
         FakeMatcherRelations(

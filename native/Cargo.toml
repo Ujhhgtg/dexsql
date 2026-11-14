@@ -15,7 +15,7 @@ name = "dexsql_jni"
 crate-type = ["cdylib"]
 
 [dependencies]
-dexsql = { git = "https://github.com/Ujhhgtg/dexsql-rs.git", rev = "3703574990cf160d0bb31bd8ab8afd6253a6a554" }
+dexsql = { git = "https://github.com/Ujhhgtg/dexsql-rs.git", rev = "5f016f6edd9997ee2d1ec73a618f1d5b0852aee2" }
 jni-sys = "0.4.1"
 serde_json = "1"
 
