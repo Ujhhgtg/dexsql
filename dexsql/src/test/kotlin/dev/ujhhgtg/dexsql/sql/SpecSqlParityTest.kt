@@ -104,11 +104,11 @@ class SpecSqlParityTest {
     }
 
     @Test
-    fun classMemberConstraintFallsBackToMatcher() {
+    fun classMemberAccessConstraintCompiles() {
         val spec = classSpec {
             field { readMethod { name("accessor") } }
             fieldCount = 2..2
         }
-        assertFalse(spec.isSqlExpressible())
+        assertTrue(spec.isSqlExpressible())
     }
 }

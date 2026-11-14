@@ -10,8 +10,7 @@ import dev.ujhhgtg.dexsql.matcher.classSpec
 import dev.ujhhgtg.dexsql.matcher.fieldSpec
 import dev.ujhhgtg.dexsql.matcher.methodSpec
 import org.junit.jupiter.api.Assertions.assertEquals
-import org.junit.jupiter.api.Assertions.assertFalse
-import org.junit.jupiter.api.Assertions.assertNull
+import org.junit.jupiter.api.Assertions.assertNotNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 
@@ -309,14 +308,14 @@ class SpecSqlScopeParityTest {
     // ------------------------------------------------------------------
 
     @Test
-    fun classSpecFallbackForStructuralSuperClassConstraints() {
-        assertNull(classSpec { superClass { modifiers = 1 } }.toSqlOrNull())
-        assertNull(classSpec { superClass { method { name("x") } } }.toSqlOrNull())
-        assertNull(classSpec { superClass { searchPackages("com.tencent.mm") } }.toSqlOrNull())
-        assertNull(
+    fun classSpecCompilesStructuralSuperClassConstraints() {
+        assertNotNull(classSpec { superClass { modifiers = 1 } }.toSqlOrNull())
+        assertNotNull(classSpec { superClass { method { name("x") } } }.toSqlOrNull())
+        assertNotNull(classSpec { superClass { searchPackages("com.tencent.mm") } }.toSqlOrNull())
+        assertNotNull(
             classSpec { superClass { superClass("com.tencent.mm.Base") } }.toSqlOrNull(),
         )
-        assertFalse(classSpec { superClass { modifiers = 1 } }.isSqlExpressible())
+        assertTrue(classSpec { superClass { modifiers = 1 } }.isSqlExpressible())
     }
 
     @Test
@@ -339,9 +338,8 @@ class SpecSqlScopeParityTest {
     }
 
     @Test
-    fun methodSpecFallbackForNestedDeclaredClassPackagesAndNumbers() {
-        // A class-literal constraint cannot carry packages; the matcher fallback evaluates them.
-        assertNull(
+    fun methodSpecCompilesNestedDeclaredClassPackagesAndNumbers() {
+        assertNotNull(
             methodSpec {
                 name("run")
                 declaredClass {
@@ -351,8 +349,7 @@ class SpecSqlScopeParityTest {
             }
                 .toSqlOrNull(),
         )
-        // Nested method units (class/field accessors) never carry class-literal constraint joins.
-        assertNull(
+        assertNotNull(
             classSpec {
                 method {
                     name("run")
@@ -364,7 +361,7 @@ class SpecSqlScopeParityTest {
             }
                 .toSqlOrNull(),
         )
-        assertNull(
+        assertNotNull(
             fieldSpec {
                 name("field")
                 readMethod {

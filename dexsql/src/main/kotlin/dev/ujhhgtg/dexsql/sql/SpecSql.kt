@@ -14,35 +14,35 @@ import dev.ujhhgtg.dexsql.meta.FieldUsingType
  * Spec -> canonical DexSQL IR conversion.
  *
  * The public authoring API is the declarative matcher DSL ([ClassSpec]/[MethodSpec]/[FieldSpec]). A
- * spec is lowered to the existing byte-stable SQL emitter only when every predicate is
- * representable there; [isSqlExpressible] answers that question. Non-expressible specs (struct
- * member constraints, annotations, non-count opcodes, etc.) are evaluated by the query matcher.
- *
- * These functions are internal because [DexSqlQuery]/[SqlMethodQuery]/[SqlClassQuery]/
- * [SqlFieldQuery] are no longer public authoring APIs; they remain the SQL IR used for the
- * canonical fast path and parity tests.
+ * Specs supported by the canonical emitter retain its byte-stable SQL. Structural predicates,
+ * relation constraints, and boolean groups compose through native SQL membership queries.
+ * Predicates outside both compiler surfaces return null without dropping constraints.
  */
 fun MethodSpec.toSqlOrNull(constructor: Boolean = false): String? = runCatching {
-    emitMethod(toSqlMethodQueryOrNull(constructor) ?: return null, constructor)
+    val query = toSqlMethodQueryOrNull(constructor)
+    if (query == null) ComposedSpecSql().method(this, constructor)
+    else emitMethod(query, constructor)
 }
     .getOrNull()
 
 fun MethodSpec.isSqlExpressible(constructor: Boolean = false): Boolean =
-    toSqlMethodQueryOrNull(constructor) != null
+    toSqlOrNull(constructor) != null
 
 fun ClassSpec.toSqlOrNull(): String? = runCatching {
-    emitClass(toSqlClassQueryOrNull() ?: return null)
+    val query = toSqlClassQueryOrNull()
+    if (query == null) ComposedSpecSql().clazz(this) else emitClass(query)
 }
     .getOrNull()
 
-fun ClassSpec.isSqlExpressible(): Boolean = toSqlClassQueryOrNull() != null
+fun ClassSpec.isSqlExpressible(): Boolean = toSqlOrNull() != null
 
 fun FieldSpec.toSqlOrNull(): String? = runCatching {
-    emitField(toSqlFieldQueryOrNull() ?: return null)
+    val query = toSqlFieldQueryOrNull()
+    if (query == null) ComposedSpecSql().field(this) else emitField(query)
 }
     .getOrNull()
 
-fun FieldSpec.isSqlExpressible(): Boolean = toSqlFieldQueryOrNull() != null
+fun FieldSpec.isSqlExpressible(): Boolean = toSqlOrNull() != null
 
 private fun NameMatch.toSqlMode(): SqlStringMatchMode =
     when (this) {
@@ -150,6 +150,7 @@ private fun ClassSpec.isNameOnly(): Boolean =
         fieldCount == null &&
         methodCount == null &&
         interfaceCount == null &&
+        annotationCount == null &&
         modifiers == null &&
         usingStrings.isEmpty() &&
         annotations.isEmpty() &&
@@ -171,6 +172,7 @@ private fun ClassSpec.isClassLiteralConstraintExpressible(): Boolean =
         fieldCount == null &&
         methodCount == null &&
         interfaceCount == null &&
+        annotationCount == null &&
         modifiers == null &&
         annotations.size <= 1 &&
         annotations.all(AnnotationSpec::isSqlAnnotationExpressible) &&
@@ -251,7 +253,11 @@ internal fun MethodSpec.toSqlMethodQueryOrNull(
         if (usingFields.size > 1) return null
         val access = usingFields.single()
         val field = access.field
-        if (field.declaredClass != null) return null
+        val fieldClass =
+            field.declaredClass?.let { owner ->
+                if (!owner.isNameOnly() || owner.className!!.match != NameMatch.Equals) return null
+                owner.className.value
+            }
         if (field.modifiers != null) return null
         if (field.readMethods.isNotEmpty() || field.writeMethods.isNotEmpty()) return null
         if (field.searchPackages.isNotEmpty() || field.excludePackages.isNotEmpty()) return null
@@ -273,7 +279,12 @@ internal fun MethodSpec.toSqlMethodQueryOrNull(
                 FieldUsingType.Read -> "get"
                 FieldUsingType.Write -> "put"
             }
-        query.usingField(fieldName = fieldName, fieldType = fieldType, usingType = usingType)
+        query.usingField(
+            fieldName = fieldName,
+            fieldType = fieldType,
+            fieldClass = fieldClass,
+            usingType = usingType,
+        )
     }
     if (anyOf.isNotEmpty()) {
         anyOf.forEach { alternative ->
@@ -288,6 +299,7 @@ internal fun MethodSpec.toSqlMethodQueryOrNull(
 }
 
 internal fun ClassSpec.toSqlClassQueryOrNull(): SqlClassQuery? {
+    if (annotationCount != null) return null
     if (annotations.isNotEmpty()) return null
     val interfaceSpecs = mutableListOf<SqlNameMatch>()
     for (interfaceSpec in interfaces) {
@@ -386,7 +398,9 @@ private fun SqlMethodQuery.hasMatcherPredicates(): Boolean =
         name != null ||
         modifiers != null ||
         declaredClass != null ||
+        declaredClassMatch != null ||
         returnType != null ||
+        returnTypeMatch != null ||
         paramTypes != null ||
         paramCount != null ||
         opcodeCountRange != null ||
@@ -396,14 +410,13 @@ private fun SqlMethodQuery.hasMatcherPredicates(): Boolean =
         anyParamTypes.isNotEmpty()
 
 internal fun FieldSpec.toSqlFieldQueryOrNull(): SqlFieldQuery? {
+    if (readMethods.size > 1 || writeMethods.size > 1) return null
     val query = SqlFieldQuery()
     name?.let {
         if (it.match != NameMatch.Equals) return null
         query.name = it.value
     }
-    modifiers?.let {
-        return null
-    }
+    query.modifiers = modifiers
     declaredClass?.let { classSpec ->
         if (!classSpec.isNameOnly()) return null
         val nameSpec = classSpec.className ?: return null
@@ -431,6 +444,7 @@ internal fun FieldSpec.toSqlFieldQueryOrNull(): SqlFieldQuery? {
         query.name == null &&
             query.declaredClass == null &&
             query.type == null &&
+            query.modifiers == null &&
             query.accesses.isEmpty() &&
             query.literals.searchPackages.isEmpty() &&
             query.literals.excludePackages.isEmpty()

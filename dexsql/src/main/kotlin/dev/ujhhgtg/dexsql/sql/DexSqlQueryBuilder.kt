@@ -632,7 +632,12 @@ private fun appendSuperClassConstraint(
     return index
 }
 
-internal fun emitMethod(query: SqlMethodQuery, constructor: Boolean): String {
+internal fun emitMethod(
+    query: SqlMethodQuery,
+    constructor: Boolean,
+    projection: String = "descriptor",
+): String {
+    require(projection == "descriptor" || projection == "class_descriptor")
     val where = mutableListOf<String>()
     val properties: MethodProperties
     if (constructor) {
@@ -668,6 +673,9 @@ internal fun emitMethod(query: SqlMethodQuery, constructor: Boolean): String {
         where += "$alias.method_idx = m.method_idx"
         access.fieldName?.let { where += alias + ".field_name = " + sqlQuote(it) }
         access.fieldType?.let { where += alias + ".field_type = " + sqlQuote(javaType(it)) }
+        access.fieldClass?.let {
+            where += alias + ".field_class = " + sqlQuote(classDescriptor(it))
+        }
         access.usingType?.let { where += alias + ".using_type = " + sqlQuote(it) }
     }
     packageCondition("m.class_descriptor", query.literals.searchPackages)?.let { where += it }
@@ -703,10 +711,12 @@ internal fun emitMethod(query: SqlMethodQuery, constructor: Boolean): String {
         "sqlMethod requires at least one predicate"
     }
     return buildString {
-        append("SELECT DISTINCT m.descriptor AS method FROM methods m")
+        append(
+            "SELECT DISTINCT m.$projection AS ${if (projection == "descriptor") "method" else "descriptor"} FROM methods m",
+        )
         appendJoins(joins)
         append(" WHERE ").append(where.joinToString(" AND "))
-        append(" ORDER BY m.descriptor")
+        append(" ORDER BY m.$projection")
         appendRange(query.literals)
         append(';')
     }
@@ -885,6 +895,12 @@ internal fun emitField(query: SqlFieldQuery): String {
     query.name?.let { where += "f.name = " + sqlQuote(it) }
     query.declaredClass?.let { where += "f.class_descriptor = " + sqlQuote(classDescriptor(it)) }
     query.type?.let { where += "f.type_descriptor = " + sqlQuote(javaType(it)) }
+    if (query.modifiers != null) {
+        joins += "JOIN class_fields cf ON cf.field_descriptor = f.descriptor"
+        where += "cf.file_id = f.file_id"
+        where += "cf.field_idx = f.field_idx"
+    }
+    query.modifiers?.let { where += "((cf.access_flags & $it) = $it)" }
     packageCondition("f.class_descriptor", query.literals.searchPackages)?.let { where += it }
     packageExcludeCondition("f.class_descriptor", query.literals.excludePackages)?.let {
         where += it

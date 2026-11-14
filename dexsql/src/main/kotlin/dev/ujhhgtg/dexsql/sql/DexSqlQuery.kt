@@ -82,6 +82,7 @@ class SqlUsingField(
     val fieldName: String? = null,
     val fieldType: String? = null,
     val usingType: String? = null,
+    val fieldClass: String? = null,
 )
 
 class SqlMethodQuery internal constructor() {
@@ -154,8 +155,9 @@ class SqlMethodQuery internal constructor() {
         fieldName: String? = null,
         fieldType: String? = null,
         usingType: String? = null,
+        fieldClass: String? = null,
     ) {
-        usingFields += SqlUsingField(fieldName, fieldType, usingType)
+        usingFields += SqlUsingField(fieldName, fieldType, usingType, fieldClass)
     }
 
     /** Set the declaring class; same as assigning [declaredClass]. */
@@ -484,6 +486,9 @@ class SqlFieldQuery internal constructor() {
     /** Field type (f.type_descriptor); same type syntax as [SqlMethodQuery.returnType]. */
     var type: String? = null
 
+    /** Access-flag mask on the field definition. */
+    var modifiers: Int? = null
+
     internal val literals = DexSqlLiterals()
     internal val accesses = mutableListOf<SqlFieldAccess>()
 
@@ -495,6 +500,11 @@ class SqlFieldQuery internal constructor() {
     /** Set the field type; same as assigning [type]. */
     fun type(value: String) {
         type = value
+    }
+
+    /** Set the access-flag mask; every requested bit must be present. */
+    fun modifiers(mask: Int) {
+        modifiers = mask
     }
 
     /** Add a read-access method matcher (method_field_accesses.using_type = 'get'). */
