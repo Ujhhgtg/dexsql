@@ -121,7 +121,7 @@ class DexSqlBridge private constructor(handle: Long) : AutoCloseable {
             val response =
                 try {
                     json.decodeFromString<NativeResponse>(raw)
-                } catch (error: Throwable) {
+                } catch (error: Exception) {
                     throw DexSqlProtocolException(
                         "DexSQL $operation returned malformed JSON: " +
                             (error.message ?: error.javaClass.simpleName),

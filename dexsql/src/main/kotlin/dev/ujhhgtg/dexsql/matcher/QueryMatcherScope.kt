@@ -107,6 +107,7 @@ class QueryMatcherScope(
     private val sessionCache: MatcherSessionCache? = null,
 ) {
     private val localStringClasses = HashMap<String, Set<String>>()
+    private val localStringMethods = HashMap<StringSpec, Set<String>>()
     private val classMatchCache = HashMap<Pair<String, ClassSpec>, Boolean>()
 
     // Candidate queries are executed at most once per resolution scope for small result sets; the
@@ -114,7 +115,18 @@ class QueryMatcherScope(
     private val candidateSqlCache = java.util.concurrent.ConcurrentHashMap<String, List<String>>()
     private val localRawDocuments = java.util.HashMap<String, JsonObject>()
 
-    private val evaluator = DexMatcherEvaluator(metadata, relations, ::classUsingString)
+    private val evaluator =
+        DexMatcherEvaluator(metadata, relations, ::classUsingString, ::methodUsingString)
+
+    private fun methodUsingString(info: DexMethodInfo, spec: StringSpec): Boolean {
+        if (spec.value.isEmpty()) return info.usingStrings.any { spec.matches(it) }
+        val methods =
+            localStringMethods.getOrPut(spec) {
+                val sql = sqlMethod { addMethodStringPredicate(this, spec) }.toSql()
+                query.descriptors(sql).toHashSet()
+            }
+        return info.descriptor in methods
+    }
 
     // Native metadata document construction can fail on obfuscated method refs whose declaring
     // class is an array type (engine limitation, engine repo is frozen). A candidate whose

@@ -1,6 +1,7 @@
 package dev.ujhhgtg.dexsql
 
 import dev.ujhhgtg.dexsql.matcher.DexMatcherSession
+import dev.ujhhgtg.dexsql.matcher.methodSpec
 import dev.ujhhgtg.dexsql.sql.sqlMethod
 import java.io.File
 import kotlinx.serialization.json.jsonArray
@@ -92,6 +93,30 @@ class DexSqlBridgeTest {
                     setOf("Lfixtures/Alpha;->doIt()V", "Lfixtures/Beta;->run()V"),
                     callers.map { it.descriptor }.toSet(),
                 )
+            }
+        }
+    }
+
+    @Test
+    fun callerLiteralConstraintsMatchAcrossDexFiles() {
+        open().use { bridge ->
+            DexMatcherSession(bridge).use { session ->
+                val descriptor = "Lfixtures/Alpha;->add(IJLjava/lang/String;[I)I"
+                for (literal in listOf("beta-one", "call-one")) {
+                    val spec = methodSpec {
+                        this.descriptor = descriptor
+                        callerMethod { usingEqStrings(literal) }
+                    }
+                    assertEquals(
+                        listOf(descriptor),
+                        session.findMethods(spec).map { it.descriptor },
+                    )
+                }
+                val missing = methodSpec {
+                    this.descriptor = descriptor
+                    callerMethod { usingEqStrings("BETA-ONE") }
+                }
+                assertTrue(session.findMethods(missing).isEmpty())
             }
         }
     }

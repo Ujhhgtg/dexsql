@@ -36,6 +36,7 @@ internal class DexMatcherEvaluator(
      * otherwise surface as a DexSqlException during a pure matcher evaluation.
      */
     private val classUsingString: ((DexClassInfo, StringSpec) -> Boolean)? = null,
+    private val methodUsingString: ((DexMethodInfo, StringSpec) -> Boolean)? = null,
 ) {
     fun matchesClass(info: DexClassInfo, spec: ClassSpec): Boolean {
         spec.className?.let { if (!nameSpecMatchesJavaName(it, info.name)) return false }
@@ -174,7 +175,13 @@ internal class DexMatcherEvaluator(
             }
         }
         for (stringSpec in spec.usingStrings) {
-            if (info.usingStrings.none { stringSpec.matches(it) }) return false
+            val matched =
+                if (!info.rawJson.containsKey("using_strings") && methodUsingString != null) {
+                    methodUsingString.invoke(info, stringSpec)
+                } else {
+                    info.usingStrings.any { stringSpec.matches(it) }
+                }
+            if (!matched) return false
         }
         if (spec.usingNumbers.isNotEmpty()) {
             val candidateNumbers = usingNumbers(info)
@@ -187,14 +194,18 @@ internal class DexMatcherEvaluator(
             }
         }
         if (
-            !injectiveMatch(spec.usingFields, info.usingFields) { fieldSpec, access ->
-                (fieldSpec.usingType == null || fieldSpec.usingType == access.usingType) &&
-                    matchesField(access.field, fieldSpec.field)
-            }
+            spec.usingFields.isNotEmpty() &&
+                !injectiveMatch(spec.usingFields, info.usingFields) { fieldSpec, access ->
+                    (fieldSpec.usingType == null || fieldSpec.usingType == access.usingType) &&
+                        matchesField(access.field, fieldSpec.field)
+                }
         ) {
             return false
         }
-        if (!injectiveMatch(spec.invokeMethods, info.invokes) { s, c -> matchesMethod(c, s) }) {
+        if (
+            spec.invokeMethods.isNotEmpty() &&
+                !injectiveMatch(spec.invokeMethods, info.invokes) { s, c -> matchesMethod(c, s) }
+        ) {
             return false
         }
         if (spec.callerMethods.isNotEmpty()) {
