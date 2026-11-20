@@ -74,6 +74,7 @@ object MatcherSpecJson {
 
     private fun parseClass(json: JsonObject): ClassSpec =
         ClassSpec(
+            noneOf = json.arrayOrNull("none_of").orEmpty().map { parseClass(it.asObject()) },
             className =
                 json.objectOrNull("class_name")?.let(::parseNameSpec)
                     ?: json.stringOrNull("class_name")?.let { NameSpec(it) },
@@ -107,6 +108,8 @@ object MatcherSpecJson {
                 json.arrayOrNull("read_methods").orEmpty().map { parseMethod(it.asObject()) },
             writeMethods =
                 json.arrayOrNull("write_methods").orEmpty().map { parseMethod(it.asObject()) },
+            annotations =
+                json.arrayOrNull("annotations").orEmpty().map { parseAnnotation(it.asObject()) },
             searchPackages = json.stringList("search_packages"),
             excludePackages = json.stringList("exclude_packages"),
         )

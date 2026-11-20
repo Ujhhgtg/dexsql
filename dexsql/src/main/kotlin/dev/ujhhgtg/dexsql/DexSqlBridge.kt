@@ -89,15 +89,44 @@ class DexSqlBridge private constructor(handle: Long) : AutoCloseable {
         fun open(paths: Iterable<String>): DexSqlBridge {
             val inputs = paths.filter(String::isNotEmpty).distinct()
             require(inputs.isNotEmpty()) { "DexSQL requires at least one input path" }
-            val response = decodeEnvelope(DexSqlNative.open(inputs.toTypedArray()), "open")
+            return decodeOpen(DexSqlNative.open(inputs.toTypedArray()), "open")
+        }
+
+        /** Open one or more DEX/APK/JAR/ZIP paths. */
+        fun open(vararg paths: String): DexSqlBridge = open(paths.asIterable())
+
+        /**
+         * Read this ART loader's own DEX elements in load order. Set [isMemoryBacked] to prefer
+         * loaded ART images and support loaders without paths.
+         */
+        @JvmStatic
+        @JvmOverloads
+        fun open(classLoader: ClassLoader, isMemoryBacked: Boolean = false): DexSqlBridge {
+            val loaderType =
+                try {
+                    Class.forName("dalvik.system.BaseDexClassLoader", false, null)
+                } catch (error: ClassNotFoundException) {
+                    throw UnsupportedOperationException(
+                        "Opening from ClassLoader requires Android ART",
+                        error,
+                    )
+                }
+            require(loaderType.isInstance(classLoader)) {
+                "ClassLoader must be a BaseDexClassLoader"
+            }
+            return decodeOpen(
+                DexSqlNative.openClassLoader(classLoader, isMemoryBacked),
+                "openClassLoader",
+            )
+        }
+
+        private fun decodeOpen(raw: String, operation: String): DexSqlBridge {
+            val response = decodeEnvelope(raw, operation)
             val handle =
                 response.handle?.takeIf { it > 0L }
                     ?: throw DexSqlProtocolException("DexSQL open response omitted the handle")
             return DexSqlBridge(handle)
         }
-
-        /** Open one or more DEX/APK/JAR/ZIP paths. */
-        fun open(vararg paths: String): DexSqlBridge = open(paths.asIterable())
 
         private fun decodeMetadata(raw: String): JsonObject? {
             val response = decodeEnvelope(raw, "metadata")

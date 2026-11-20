@@ -52,6 +52,13 @@ DexSqlBridge.open("app.apk").use { bridge ->
 
 On Android, `DexSqlBridge.open(applicationInfo)` (from `dexsql-android`) opens the base and split APKs.
 
+On Android ART, `DexSqlBridge.open(classLoader)` opens the file-backed DEX elements of a
+`BaseDexClassLoader`. `DexSqlBridge.open(classLoader, isMemoryBacked = true)` also supports
+`InMemoryDexClassLoader` and prefers ART's loaded DEX images. Both overloads inspect the supplied
+loader's own elements. Read-only ART mappings stay alive for the session, writable images are copied,
+and unsupported images such as CompactDex fall back to the element's source path when available.
+ClassLoader input requires access to ART's hidden runtime fields.
+
 ## Building
 
 Requires JDK 21, a Rust toolchain (`rustup`; `native/rust-toolchain.toml` pins the channel and
@@ -66,6 +73,9 @@ Gradle builds `native/` with Cargo. The Android linker, `CC`, `CXX` and `AR` are
 `CARGO_TARGET_<TRIPLE>_LINKER`/`CC_<triple>`/... environment variables derived from the NDK; no
 `.cargo/config.toml` is used. Variables you already export take precedence. Override the Cargo
 executable with `-Pdexsql.cargo=...` and the toolchain with `-Pdexsql.rustToolchain=...`.
+Builds use the Rust revision pinned in `native/Cargo.toml` and `native/Cargo.lock`.
+For local development, use `-Pdexsql.coreSource=/path/to/dexsql-rs/dexsql-core` to build against
+an explicit checkout instead.
 
 ## Releasing
 

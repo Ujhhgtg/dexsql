@@ -19,8 +19,11 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use dexsql::{Engine, EngineOptions, Error as DexSqlError, IndexNeeds, MetaQuery};
-use jni_sys::{JNIEnv, jlong, jobject, jobjectArray, jsize, jstring};
+use jni_sys::{JNIEnv, jboolean, jlong, jobject, jobjectArray, jsize, jstring};
 use serde_json::{Value, json};
+
+#[cfg(target_os = "android")]
+mod class_loader;
 
 type Session = Arc<Engine>;
 
@@ -215,6 +218,37 @@ pub extern "system" fn Java_dev_ujhhgtg_dexsql_DexSqlNative_open(
         match Engine::open_with_options(paths, engine_options()) {
             Ok(engine) => success(json!({ "handle": insert_session(engine) })),
             Err(error) => engine_error(error),
+        }
+    });
+    new_string(env, &response)
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_ujhhgtg_dexsql_DexSqlNative_openClassLoader(
+    env: *mut JNIEnv,
+    _this: jobject,
+    loader: jobject,
+    is_memory_backed: jboolean,
+) -> jstring {
+    let response = guarded(|| {
+        #[cfg(target_os = "android")]
+        {
+            let inputs = match class_loader::inputs(env, loader, is_memory_backed) {
+                Ok(inputs) => inputs,
+                Err(error) => return failure("class_loader", error),
+            };
+            match Engine::open_inputs_with_options(inputs, engine_options()) {
+                Ok(engine) => success(json!({ "handle": insert_session(engine) })),
+                Err(error) => engine_error(error),
+            }
+        }
+        #[cfg(not(target_os = "android"))]
+        {
+            let _ = (loader, is_memory_backed);
+            failure(
+                "unsupported",
+                "Opening from ClassLoader requires Android ART",
+            )
         }
     });
     new_string(env, &response)

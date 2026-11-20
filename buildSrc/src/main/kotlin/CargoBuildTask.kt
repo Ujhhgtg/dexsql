@@ -37,6 +37,9 @@ constructor(
     @get:PathSensitive(PathSensitivity.RELATIVE)
     abstract val crateSources: ConfigurableFileCollection
 
+    @get:Input @get:Optional abstract val coreSourcePath: Property<String>
+    @get:Input @get:Optional abstract val engineSourcePath: Property<String>
+
     @get:Internal abstract val crateDirectory: DirectoryProperty
 
     /** Shared Cargo target directory; Cargo's own lock serializes concurrent builds. */
@@ -71,6 +74,15 @@ constructor(
             exec.exec {
                 workingDir = crate
                 executable = cargo.get()
+                val overrides = listOfNotNull(engineSourcePath.orNull, coreSourcePath.orNull)
+                if (overrides.isNotEmpty()) {
+                    val entries =
+                        overrides.joinToString(",") { path ->
+                            val escaped = path.replace("\\", "\\\\").replace("\"", "\\\"")
+                            "\"$escaped\""
+                        }
+                    args("--config", "paths=[$entries]")
+                }
                 args(
                     "build",
                     "--release",
@@ -154,6 +166,19 @@ fun CargoBuildTask.configureNativeCrate(rootDirectory: File) {
         crate.resolve("Cargo.toml"),
         crate.resolve("Cargo.lock"),
         crate.resolve("rust-toolchain.toml"),
+    )
+    val coreSource =
+        project.providers.gradleProperty("dexsql.coreSource").map { project.file(it).absoluteFile }
+    val engineSource = coreSource.map { it.resolveSibling("dexsql") }
+    coreSourcePath.set(coreSource.map { it.invariantSeparatorsPath })
+    engineSourcePath.set(engineSource.map { it.invariantSeparatorsPath })
+    crateSources.from(
+        coreSource
+            .map { source -> listOf(source.resolve("Cargo.toml"), source.resolve("src")) }
+            .orElse(emptyList()),
+        engineSource
+            .map { source -> listOf(source.resolve("Cargo.toml"), source.resolve("src")) }
+            .orElse(emptyList()),
     )
     cargoTargetDirectory.set(crate.resolve("target"))
     libraryName.set("dexsql_jni")

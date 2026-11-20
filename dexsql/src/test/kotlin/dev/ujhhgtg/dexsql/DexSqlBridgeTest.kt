@@ -22,6 +22,18 @@ class DexSqlBridgeTest {
         DexSqlBridge.open(listOf("alpha.dex", "beta.dex").map { fixtures.resolve(it).path })
 
     @Test
+    fun classLoaderInputReportsUnsupportedOnDesktop() {
+        val loader = javaClass.classLoader
+        val error =
+            assertThrows(UnsupportedOperationException::class.java) {
+                DexSqlBridge.open(loader, isMemoryBacked = true)
+            }
+        assertTrue(error.message.orEmpty().contains("Android ART"))
+        val nativeResponse = DexSqlNative.openClassLoader(loader, false)
+        assertTrue(nativeResponse.contains("\"kind\":\"unsupported\""))
+    }
+
+    @Test
     fun bundledLibraryResourceIsResolved() {
         assertEquals(
             "/dev/ujhhgtg/dexsql/native/linux-x86_64/libdexsql_jni.so",

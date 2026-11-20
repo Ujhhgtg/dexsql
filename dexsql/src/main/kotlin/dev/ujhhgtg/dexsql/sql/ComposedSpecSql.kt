@@ -214,6 +214,7 @@ internal class ComposedSpecSql {
 
     private fun classPredicates(spec: ClassSpec, owner: String): List<String> = buildList {
         require(spec.annotations.isEmpty() && spec.annotationCount == null)
+        spec.noneOf.forEach { add("NOT (${and(classPredicates(it, owner))})") }
         spec.className?.let { add(typeName("$owner.descriptor", it)) }
         addAll(packages("$owner.descriptor", spec.searchPackages, spec.excludePackages))
         spec.modifiers?.let { add("($owner.access_flags & $it) = $it") }
@@ -238,7 +239,11 @@ internal class ComposedSpecSql {
                 "class_descriptor",
                 spec.fields.map { nested ->
                     { relation: String ->
-                        if (nested.readMethods.isEmpty() && nested.writeMethods.isEmpty()) {
+                        if (
+                            nested.readMethods.isEmpty() &&
+                                nested.writeMethods.isEmpty() &&
+                                nested.annotations.isEmpty()
+                        ) {
                             and(
                                 buildList {
                                     nested.name?.let {
@@ -295,6 +300,11 @@ internal class ComposedSpecSql {
     }
 
     private fun fieldPredicates(spec: FieldSpec, owner: String): List<String> = buildList {
+        require(spec.annotations.size <= 1)
+        spec.annotations.singleOrNull()?.let { annotation ->
+            val sql = requireNotNull(annotationOwnerSql("field", annotation))
+            add("$owner.descriptor IN ($sql)")
+        }
         spec.name?.let { add(name("$owner.name", it.value, it.match)) }
         addAll(packages("$owner.class_descriptor", spec.searchPackages, spec.excludePackages))
         spec.type?.let { add(classReference("$owner.type_descriptor", it)) }

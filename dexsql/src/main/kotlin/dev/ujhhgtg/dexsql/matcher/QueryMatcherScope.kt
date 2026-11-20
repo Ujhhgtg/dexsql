@@ -11,6 +11,7 @@ import dev.ujhhgtg.dexsql.sql.SqlClassQuery
 import dev.ujhhgtg.dexsql.sql.SqlFieldQuery
 import dev.ujhhgtg.dexsql.sql.SqlMethodQuery
 import dev.ujhhgtg.dexsql.sql.SqlStringMatchMode
+import dev.ujhhgtg.dexsql.sql.annotationOwnerSql
 import dev.ujhhgtg.dexsql.sql.sqlClass
 import dev.ujhhgtg.dexsql.sql.sqlField
 import dev.ujhhgtg.dexsql.sql.sqlMethod
@@ -115,8 +116,41 @@ class QueryMatcherScope(
     private val candidateSqlCache = java.util.concurrent.ConcurrentHashMap<String, List<String>>()
     private val localRawDocuments = java.util.HashMap<String, JsonObject>()
 
+    private val annotationOwners = HashMap<String, Set<String>>()
+
     private val evaluator =
-        DexMatcherEvaluator(metadata, relations, ::classUsingString, ::methodUsingString)
+        DexMatcherEvaluator(
+            metadata,
+            relations,
+            ::classUsingString,
+            ::methodUsingString,
+            ::matchesFieldAnnotations,
+        )
+
+    private fun ownersWithAnnotation(sql: String): Set<String> =
+        annotationOwners.getOrPut(sql) { query.descriptors(sql).toSet() }
+
+    private fun fieldAnnotationSql(annotations: List<AnnotationSpec>): String {
+        require(annotations.size == 1) {
+            "Field annotation matching requires one annotation constraint"
+        }
+        return requireNotNull(annotationOwnerSql("field", annotations.single())) {
+            "Field annotation matching requires a type and/or a top-level string value"
+        }
+    }
+
+    private fun matchesFieldAnnotations(
+        descriptor: String,
+        annotations: List<AnnotationSpec>,
+    ): Boolean = descriptor in ownersWithAnnotation(fieldAnnotationSql(annotations))
+
+    private fun annotationCandidates(
+        kind: String,
+        annotations: List<AnnotationSpec>,
+    ): List<CandidateSource>? {
+        val sql = annotations.firstNotNullOfOrNull { annotationOwnerSql(kind, it) } ?: return null
+        return listOf(CandidateSource.Descriptors(ownersWithAnnotation(sql).toList()))
+    }
 
     private fun methodUsingString(info: DexMethodInfo, spec: StringSpec): Boolean {
         if (spec.value.isEmpty()) return info.usingStrings.any { spec.matches(it) }
@@ -556,6 +590,9 @@ class QueryMatcherScope(
         spec: MethodSpec,
         searchPackages: List<String>,
     ): List<CandidateSource>? {
+        annotationCandidates("method", spec.annotations)?.let {
+            return it
+        }
         val steps = methodCandidateSteps(spec, searchPackages) ?: return null
         return listOf(
             CandidateSource.Sql(sqlMethod { steps.forEach { step -> step(this) } }.toSql()),
@@ -657,6 +694,9 @@ class QueryMatcherScope(
         val scopePackages = (searchPackages + spec.searchPackages).distinct()
         // Candidate priority: most selective canonical source first, package-only scan last.
         // 1) explicit class name (canonical class scan)
+        annotationCandidates("class", spec.annotations)?.let {
+            return it
+        }
         classDirectCandidateSources(spec, scopePackages)?.let {
             return it
         }
@@ -856,6 +896,7 @@ class QueryMatcherScope(
      */
     private fun fieldUnitSelectivity(spec: FieldSpec): Int {
         var score = 0
+        if (spec.annotations.isNotEmpty()) score = 110
         if (spec.name?.match == NameMatch.Equals) score = maxOf(score, 100)
         spec.declaredClass
             ?.takeIf(::classSpecIsNameOnly)
@@ -912,6 +953,10 @@ class QueryMatcherScope(
         spec: FieldSpec,
         searchPackages: List<String>,
     ): List<CandidateSource>? {
+        if (spec.annotations.isNotEmpty()) {
+            val sql = fieldAnnotationSql(spec.annotations)
+            return listOf(CandidateSource.Descriptors(ownersWithAnnotation(sql).toList()))
+        }
         // 1) readMethods/writeMethods access units (with every pushable field predicate as a
         //    conjunct) are selective. When the spec ALSO has a selective base predicate (name /
         //    declaring class / narrow type), intersect both cheap candidate sets instead of letting
@@ -1230,6 +1275,9 @@ private fun SqlClassLiteralConstraint.addClassLiteralStrings(strings: List<Strin
 
 private fun classSpecIsNameOnly(spec: ClassSpec): Boolean =
     spec.className != null &&
+        spec.noneOf.isEmpty() &&
+        spec.annotations.isEmpty() &&
+        spec.annotationCount == null &&
         spec.superClass == null &&
         spec.interfaces.isEmpty() &&
         spec.fields.isEmpty() &&

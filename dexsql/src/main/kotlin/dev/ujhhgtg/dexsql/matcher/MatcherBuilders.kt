@@ -862,6 +862,7 @@ class FieldMatcher {
 
     val readMethods = mutableListOf<MethodSpec>()
     val writeMethods = mutableListOf<MethodSpec>()
+    val annotations = mutableListOf<AnnotationSpec>()
     val searchPackages = mutableListOf<String>()
     val excludePackages = mutableListOf<String>()
 
@@ -921,6 +922,14 @@ class FieldMatcher {
         writeMethods += methods
     }
 
+    fun annotation(spec: AnnotationSpec) {
+        annotations += spec
+    }
+
+    fun annotation(block: AnnotationMatcher.() -> Unit) {
+        annotation(buildAnnotation(block))
+    }
+
     fun searchPackages(vararg values: String) {
         searchPackages += values
     }
@@ -944,6 +953,7 @@ class FieldMatcher {
         declaredClass = base.declaredClass
         readMethods.addAll(base.readMethods)
         writeMethods.addAll(base.writeMethods)
+        annotations.addAll(base.annotations)
         searchPackages.addAll(base.searchPackages)
         excludePackages.addAll(base.excludePackages)
     }
@@ -956,6 +966,7 @@ class FieldMatcher {
             declaredClass = declaredClassValue,
             readMethods = readMethods.toList(),
             writeMethods = writeMethods.toList(),
+            annotations = annotations.toList(),
             searchPackages = searchPackages.toList(),
             excludePackages = excludePackages.toList(),
         )

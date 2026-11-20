@@ -18,6 +18,8 @@ internal object DexSqlNative {
     /** Envelope: `{ok:true, handle:<long>}`. */
     external fun open(paths: Array<String>): String
 
+    external fun openClassLoader(classLoader: ClassLoader, isMemoryBacked: Boolean): String
+
     /** Envelope: `{ok:true, columns:[...], rows:[[...]]}`. */
     external fun query(handle: Long, sql: String): String
 

@@ -14,6 +14,8 @@ dexsql-rs (`fixtures/dex`), where they back the engine's metadata API tests.
   (`[I` and `[Lfixtures/Meta;` declaring classes), a generic class signature,
   runtime class/method annotations with string-array elements, and methods with
   known instruction streams for the opcode metadata tests.
+* `field-annotations.dex` defines `fixtures.FieldAnnotations`, two fields with
+  distinct runtime annotation values, and methods that read or write those fields.
 
 Regenerate from `src/` with a JDK and Android build-tools `d8` (this is what
 produced the committed files; d8 desugars string concatenation, so regenerating
@@ -30,4 +32,7 @@ D8="${ANDROID_HOME:-$HOME/android-sdk}/build-tools/35.0.0/d8"
 cp build/alpha/classes.dex alpha.dex
 cp build/beta/classes.dex beta.dex
 cp build/annotated/classes.dex annotated.dex
+mkdir -p build/field-annotations
+"$D8" --min-api 28 --output build/field-annotations build/classes/fixtures/FieldAnnotations*.class
+cp build/field-annotations/classes.dex field-annotations.dex
 ```

@@ -83,8 +83,8 @@ data class AnnotationElementSpec(val name: NameSpec, val value: AnnotationValue)
 
 /** DexKit annotation encoded value matcher. */
 sealed interface AnnotationValue {
-    /** A JSON string field (DexKit stringValue); compared exactly. */
-    data class Text(val value: String) : AnnotationValue
+    /** A JSON string field (DexKit stringValue). */
+    data class Text(val value: String, val match: NameMatch = NameMatch.Equals) : AnnotationValue
 
     /** A JSON array (DexKit arrayValue); compared element-by-element in order. */
     data class ListValue(val values: List<AnnotationValue>) : AnnotationValue
@@ -206,6 +206,7 @@ data class ClassSpec(
      * an inclusive range; builders accept both an Int and an IntRange assignment.
      */
     val annotationCount: IntRange? = null,
+    val noneOf: List<ClassSpec> = emptyList(),
 )
 
 /**
@@ -230,4 +231,5 @@ data class FieldSpec(
     val searchPackages: List<String> = emptyList(),
     /** Declaring-class packages to reject (dotted, prefix semantics like [searchPackages]). */
     val excludePackages: List<String> = emptyList(),
+    val annotations: List<AnnotationSpec> = emptyList(),
 )

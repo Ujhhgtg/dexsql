@@ -101,7 +101,8 @@ private fun AnnotationSpec.toSqlAnnotationConstraintOrNull(): SqlAnnotationConst
         when (val value = element.value) {
             is AnnotationValue.ListValue -> {
                 value.values.map { item ->
-                    (item as? AnnotationValue.Text)?.value ?: return null
+                    (item as? AnnotationValue.Text)?.takeIf { it.match == NameMatch.Equals }?.value
+                        ?: return null
                 }
             }
 
@@ -143,6 +144,7 @@ private fun ClassSpec.hasClassLiteralCalls(): Boolean =
 
 private fun ClassSpec.isNameOnly(): Boolean =
     className != null &&
+        noneOf.isEmpty() &&
         superClass == null &&
         interfaces.isEmpty() &&
         fields.isEmpty() &&
@@ -165,7 +167,8 @@ private fun ClassSpec.isNameOnly(): Boolean =
  * SQL class-literal form and force the matcher fallback.
  */
 private fun ClassSpec.isClassLiteralConstraintExpressible(): Boolean =
-    superClass == null &&
+    noneOf.isEmpty() &&
+        superClass == null &&
         interfaces.isEmpty() &&
         fields.isEmpty() &&
         methods.isEmpty() &&
@@ -253,6 +256,7 @@ internal fun MethodSpec.toSqlMethodQueryOrNull(
         if (usingFields.size > 1) return null
         val access = usingFields.single()
         val field = access.field
+        if (field.annotations.isNotEmpty()) return null
         val fieldClass =
             field.declaredClass?.let { owner ->
                 if (!owner.isNameOnly() || owner.className!!.match != NameMatch.Equals) return null
@@ -299,6 +303,7 @@ internal fun MethodSpec.toSqlMethodQueryOrNull(
 }
 
 internal fun ClassSpec.toSqlClassQueryOrNull(): SqlClassQuery? {
+    if (noneOf.isNotEmpty() || superClass?.noneOf?.isNotEmpty() == true) return null
     if (annotationCount != null) return null
     if (annotations.isNotEmpty()) return null
     val interfaceSpecs = mutableListOf<SqlNameMatch>()
@@ -410,6 +415,7 @@ private fun SqlMethodQuery.hasMatcherPredicates(): Boolean =
         anyParamTypes.isNotEmpty()
 
 internal fun FieldSpec.toSqlFieldQueryOrNull(): SqlFieldQuery? {
+    if (annotations.isNotEmpty()) return null
     if (readMethods.size > 1 || writeMethods.size > 1) return null
     val query = SqlFieldQuery()
     name?.let {

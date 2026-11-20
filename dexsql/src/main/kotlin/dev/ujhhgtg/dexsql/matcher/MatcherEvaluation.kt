@@ -37,9 +37,11 @@ internal class DexMatcherEvaluator(
      */
     private val classUsingString: ((DexClassInfo, StringSpec) -> Boolean)? = null,
     private val methodUsingString: ((DexMethodInfo, StringSpec) -> Boolean)? = null,
+    private val fieldAnnotations: ((String, List<AnnotationSpec>) -> Boolean)? = null,
 ) {
     fun matchesClass(info: DexClassInfo, spec: ClassSpec): Boolean {
         spec.className?.let { if (!nameSpecMatchesJavaName(it, info.name)) return false }
+        if (spec.noneOf.any { matchesClass(info, it) }) return false
         if (isShallow(info)) {
             // External classes have no dataset metadata: DexKit only matches their names; any
             // structural/count/member constraint cannot be satisfied.
@@ -237,6 +239,15 @@ internal class DexMatcherEvaluator(
                 return false
             }
         }
+        if (
+            spec.annotations.isNotEmpty() &&
+                !(fieldAnnotations ?: missingRelations("field annotations"))(
+                    info.descriptor,
+                    spec.annotations,
+                )
+        ) {
+            return false
+        }
         val resolvedRelations =
             if (spec.readMethods.isNotEmpty() || spec.writeMethods.isNotEmpty()) {
                 relations ?: missingRelations("field read/write methods")
@@ -369,7 +380,9 @@ internal class DexMatcherEvaluator(
     private fun matchesAnnotationValue(actual: JsonElement?, expected: AnnotationValue): Boolean {
         return when (expected) {
             is AnnotationValue.Text -> {
-                actual is JsonPrimitive && actual.contentOrNull == expected.value
+                actual is JsonPrimitive &&
+                    actual.isString &&
+                    StringSpec(expected.value, expected.match).matches(actual.content)
             }
 
             is AnnotationValue.DescriptorValue -> {
