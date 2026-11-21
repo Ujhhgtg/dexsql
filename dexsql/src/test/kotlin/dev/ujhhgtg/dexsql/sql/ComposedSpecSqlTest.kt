@@ -15,6 +15,7 @@ import dev.ujhhgtg.dexsql.meta.DexMetadata
 import java.io.File
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertNotNull
+import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Test
 
 class ComposedSpecSqlTest {
@@ -215,5 +216,32 @@ class ComposedSpecSqlTest {
         }
         assertNotNull(spec.toSqlOrNull())
         classParity(spec)
+    }
+
+    @Test
+    fun toFastSqlOrNullExcludesComposedFallbacks() {
+        val canonicalMethod = methodSpec {
+            declaredClass = "fixtures.Alpha"
+            name = "run"
+        }
+        assertNotNull(canonicalMethod.toFastSqlOrNull())
+
+        val composedMethod = methodSpec {
+            callerMethod {
+                declaredClass = "fixtures.Beta"
+                usingEqString("beta-one")
+            }
+        }
+        assertNotNull(composedMethod.toSqlOrNull())
+        assertNull(composedMethod.toFastSqlOrNull())
+
+        val composedClass = classSpec {
+            searchPackages("fixtures")
+            method {
+                opcodes(names = listOf("new-instance"), matchType = OpcodeMatchType.Contains)
+            }
+        }
+        assertNotNull(composedClass.toSqlOrNull())
+        assertNull(composedClass.toFastSqlOrNull())
     }
 }

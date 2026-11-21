@@ -38,6 +38,8 @@ internal class DexMatcherEvaluator(
     private val classUsingString: ((DexClassInfo, StringSpec) -> Boolean)? = null,
     private val methodUsingString: ((DexMethodInfo, StringSpec) -> Boolean)? = null,
     private val fieldAnnotations: ((String, List<AnnotationSpec>) -> Boolean)? = null,
+    private val selectiveCallers: ((DexMethodInfo, List<MethodSpec>) -> List<DexMethodInfo>?)? =
+        null,
 ) {
     fun matchesClass(info: DexClassInfo, spec: ClassSpec): Boolean {
         spec.className?.let { if (!nameSpecMatchesJavaName(it, info.name)) return false }
@@ -211,7 +213,9 @@ internal class DexMatcherEvaluator(
             return false
         }
         if (spec.callerMethods.isNotEmpty()) {
-            val callers = (relations ?: missingRelations("callerMethods")).callers(info.descriptor)
+            val callers =
+                selectiveCallers?.invoke(info, spec.callerMethods)
+                    ?: (relations ?: missingRelations("callerMethods")).callers(info.descriptor)
             if (!injectiveMatch(spec.callerMethods, callers) { s, c -> matchesMethod(c, s) }) {
                 return false
             }

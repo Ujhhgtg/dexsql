@@ -1158,6 +1158,57 @@ class StructuralCandidateTest {
         assertEquals(1, missingQueries)
     }
 
+    @Test
+    fun selectiveInvokeAndDeclaredClassStructuralDriveWithoutFullScan() {
+        val query = RecordingDescriptorQuery { sql ->
+            when {
+                sql.contains("mc.callee_class = 'Lcom/test/Call;'") ->
+                    listOf(MatcherFixtures.ALPHA_RUN)
+
+                sql.contains("c.superclass_descriptor = 'Lcom/test/Base;'") ->
+                    listOf(MatcherFixtures.ALPHA)
+
+                else -> emptyList()
+            }
+        }
+        val scope = scopeFor(query)
+        val invokeMatched =
+            scope.findMethods(
+                methodSpec {
+                    modifiers = 1
+                    invokeMethod {
+                        declaredClass { className("com.test.Call") }
+                    }
+                },
+            )
+        assertEquals(listOf(MatcherFixtures.ALPHA_RUN), invokeMatched.map { it.descriptor })
+        assertTrue(
+            query.queries.any {
+                it.contains("FROM method_calls mc WHERE mc.callee_class = 'Lcom/test/Call;'")
+            },
+            query.queries.joinToString(),
+        )
+
+        val superMatched =
+            scope.findMethods(
+                methodSpec {
+                    paramCount = 0..0
+                    returnType = "void"
+                    declaredClass { superClass { className("com.test.Base") } }
+                },
+            )
+        assertEquals(
+            listOf(MatcherFixtures.ALPHA_RUN, MatcherFixtures.ALPHA_INIT),
+            superMatched.map { it.descriptor },
+        )
+        assertTrue(
+            query.queries.any {
+                it.contains("c.superclass_descriptor = 'Lcom/test/Base;'")
+            },
+            query.queries.joinToString(),
+        )
+    }
+
     private fun globalClassStringRows(sql: String): List<String> =
         when {
             sql.contains("alpha marker") -> listOf(MatcherFixtures.ALPHA_RUN)

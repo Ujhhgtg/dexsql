@@ -25,6 +25,11 @@ fun MethodSpec.toSqlOrNull(constructor: Boolean = false): String? = runCatching 
 }
     .getOrNull()
 
+fun MethodSpec.toFastSqlOrNull(constructor: Boolean = false): String? = runCatching {
+    toSqlMethodQueryOrNull(constructor)?.let { emitMethod(it, constructor) }
+}
+    .getOrNull()
+
 fun MethodSpec.isSqlExpressible(constructor: Boolean = false): Boolean =
     toSqlOrNull(constructor) != null
 
@@ -34,11 +39,21 @@ fun ClassSpec.toSqlOrNull(): String? = runCatching {
 }
     .getOrNull()
 
+fun ClassSpec.toFastSqlOrNull(): String? = runCatching {
+    toSqlClassQueryOrNull()?.let(::emitClass)
+}
+    .getOrNull()
+
 fun ClassSpec.isSqlExpressible(): Boolean = toSqlOrNull() != null
 
 fun FieldSpec.toSqlOrNull(): String? = runCatching {
     val query = toSqlFieldQueryOrNull()
     if (query == null) ComposedSpecSql().field(this) else emitField(query)
+}
+    .getOrNull()
+
+fun FieldSpec.toFastSqlOrNull(): String? = runCatching {
+    toSqlFieldQueryOrNull()?.let(::emitField)
 }
     .getOrNull()
 

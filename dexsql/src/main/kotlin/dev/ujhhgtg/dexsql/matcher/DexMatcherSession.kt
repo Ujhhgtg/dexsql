@@ -25,12 +25,8 @@ class DexMatcherSession(
     val metadata: DexMetadata = DexMetadata(DexSqlMetadataProvider(bridge)),
 ) : AutoCloseable {
     private val metadataProvider = DexSqlMetadataProvider(bridge)
-    private val relations: DexMatcherRelations =
-        BridgeMatcherRelations(
-            callersOf = metadataProvider::callers,
-            query = bridge::query,
-            metadata = metadata,
-        )
+    private val sessionCache = MatcherSessionCache.forSession(bridge)
+    private val relations: DexMatcherRelations = sessionCache.relations(bridge, metadata)
     private val scope =
         QueryMatcherScope(
             metadata = metadata,
@@ -39,7 +35,7 @@ class DexMatcherSession(
             },
             relations = relations,
             rawMetadata = metadataProvider::query,
-            sessionCache = MatcherSessionCache.forSession(bridge),
+            sessionCache = sessionCache,
         )
     private val lock = Any()
 

@@ -59,6 +59,17 @@ class MatcherSessionCache internal constructor() {
         }
     }
 
+    private val sharedRelationsByMetadata =
+        ConcurrentHashMap<dev.ujhhgtg.dexsql.meta.DexMetadata, BridgeMatcherRelations>()
+
+    fun relations(
+        bridge: dev.ujhhgtg.dexsql.DexSqlBridge,
+        metadata: dev.ujhhgtg.dexsql.meta.DexMetadata,
+    ): BridgeMatcherRelations =
+        sharedRelationsByMetadata.computeIfAbsent(metadata) {
+            BridgeMatcherRelations(bridge::metadataCallers, bridge::query, it)
+        }
+
     companion object {
         private const val MAX_ENTRIES = 2048
         private const val MAX_CACHED_DESCRIPTORS = 4096

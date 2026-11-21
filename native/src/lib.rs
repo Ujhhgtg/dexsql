@@ -178,8 +178,10 @@ fn insert_session(engine: Engine) -> jlong {
 }
 
 /// Index set used by every session: the SQL DSL and query matcher read method
-/// strings, numbers, calls and field accesses, and opcode/annotation
-/// constraints need full code items.
+/// strings, numbers, calls and field accesses. Keeping `full_code_items = false`
+/// avoids eagerly heap-allocating millions of `CodeItem` instruction buffers;
+/// raw DEX bytes are still retained (because `eager_code_items = true`), so
+/// opcodes, annotations, and `code_items` decode lazily on demand.
 fn engine_options() -> EngineOptions {
     EngineOptions {
         index_needs: IndexNeeds {
@@ -192,7 +194,7 @@ fn engine_options() -> EngineOptions {
             ..IndexNeeds::default()
         },
         eager_code_items: true,
-        full_code_items: true,
+        full_code_items: false,
         retain_classes: true,
         threads: None,
     }
